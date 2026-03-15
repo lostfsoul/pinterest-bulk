@@ -1,0 +1,12 @@
+{
+  "name": "pin-renderer",
+  "version": "1.0.0",
+  "description": "Node.js Canvas-based Pinterest Pin Renderer",
+  "main": "render.js",
+  "scripts": {
+    "test": "node render.js"
+  },
+  "dependencies": {
+    "canvas": "^2.11.2"
+  }
+}
