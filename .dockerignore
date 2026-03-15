@@ -1,0 +1,31 @@
+.git
+.gitignore
+.claude
+pin-env
+venv
+.venv
+env
+ENV
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+frontend/node_modules
+frontend/dist
+backend/__pycache__
+backend/static
+backend/node_renderer/node_modules
+
+data/*.db
+data/*.db-journal
+
+storage/generated_pins
+storage/overlays
+storage/images
+storage/exports
+
+Noa kocht.svg
+Noa kocht_updated.svg
+React
