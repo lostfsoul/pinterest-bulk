@@ -247,6 +247,7 @@ class PinGenerateRequest(BaseModel):
     page_ids: list[int] | None = None  # None = all enabled pages
     board_name: str = "General"
     render_settings: PinRenderSettings | None = None
+    use_ai_titles: bool = True
 
 
 # =============================================================================

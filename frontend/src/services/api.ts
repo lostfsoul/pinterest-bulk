@@ -144,10 +144,18 @@ export interface ActivityLog {
   created_at: string;
 }
 
+export interface AuthStatus {
+  authenticated: boolean;
+  enabled: boolean;
+}
+
 // API Functions
 export const apiClient = {
   // Health check
   health: () => api.get('/health'),
+  authStatus: () => api.get<AuthStatus>('/auth/status'),
+  login: (password: string) => api.post<AuthStatus>('/auth/login', { password }),
+  logout: () => api.post<AuthStatus>('/auth/logout'),
 
   // Websites
   listWebsites: () => api.get<Website[]>('/websites'),
@@ -215,7 +223,13 @@ export const apiClient = {
   getImageStats: () => api.get<{ total: number; excluded: number; available: number }>('/images/stats'),
 
   // Pins
-  generatePins: (data: { template_id: number; page_ids?: number[]; board_name: string; render_settings?: PinRenderSettings }) =>
+  generatePins: (data: {
+    template_id: number;
+    page_ids?: number[];
+    board_name: string;
+    render_settings?: PinRenderSettings;
+    use_ai_titles?: boolean;
+  }) =>
     api.post<PinDraft[]>('/pins/generate', data),
   listPins: (params?: { status?: string; is_selected?: boolean }) =>
     api.get<PinDraft[]>('/pins', { params }),

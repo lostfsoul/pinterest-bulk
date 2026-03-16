@@ -137,6 +137,26 @@ def generate_pin_description(page: Page, keywords: List[str]) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+def generate_pin_titles(
+    page: Page,
+    keywords: List[str],
+    image_count: int,
+    use_ai_titles: bool,
+) -> list[str]:
+    """Generate one title per image for the page."""
+    from services.seo_titles import (
+        build_fallback_pin_title_variants,
+        generate_ai_pin_title_variants,
+    )
+
+    if use_ai_titles:
+        titles = generate_ai_pin_title_variants(page.title, keywords, image_count)
+        if titles:
+            return titles
+
+    return build_fallback_pin_title_variants(page.title, keywords, image_count)
+
+
 @router.post("/generate", response_model=List[PinDraftResponse])
 def generate_pins(
     request: PinGenerateRequest,
@@ -174,6 +194,7 @@ def generate_pins(
             .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
             .all()
         )
+        pin_titles = generate_pin_titles(page, keywords, len(images), request.use_ai_titles)
 
         # Get existing pins for this page
         existing_pins = (
@@ -186,15 +207,16 @@ def generate_pins(
         existing_pins_by_url = {pin.selected_image_url: pin for pin in existing_pins if pin.selected_image_url}
 
         # Create/update a pin for each image
-        for image in images:
+        for index, image in enumerate(images):
             # Check if a pin already exists for this image
             existing_pin = existing_pins_by_url.get(image.url)
+            pin_title = pin_titles[index] if index < len(pin_titles) else (page.title or "")
 
             if existing_pin:
                 # Update existing pin
                 existing_pin.template_id = template.id
                 existing_pin.selected_image_url = image.url
-                existing_pin.title = page.title or ""
+                existing_pin.title = pin_title
                 existing_pin.description = generate_pin_description(page, keywords)
                 existing_pin.board_name = request.board_name
                 existing_pin.link = page.url
@@ -212,7 +234,7 @@ def generate_pins(
                     page_id=page.id,
                     template_id=template.id,
                     selected_image_url=image.url,
-                    title=page.title or "",
+                    title=pin_title,
                     description=generate_pin_description(page, keywords),
                     board_name=request.board_name,
                     link=page.url,

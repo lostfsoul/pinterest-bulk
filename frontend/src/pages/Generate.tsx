@@ -67,6 +67,7 @@ export default function Generate() {
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<number>>(new Set());
   const [boardName, setBoardName] = useState('General');
+  const [useAiTitles, setUseAiTitles] = useState(true);
   const [currentPreviewIndex, setCurrentPreviewIndex] = useState(0);
   const [filters, setFilters] = useState({
     websiteId: '',
@@ -184,6 +185,7 @@ export default function Generate() {
         page_ids: pageIds,
         board_name: boardName,
         render_settings: settingsToApi(settings),
+        use_ai_titles: useAiTitles,
       });
 
       for (const pin of response.data) {
@@ -274,6 +276,21 @@ export default function Generate() {
                 placeholder="General"
               />
             </div>
+
+            <label className="flex items-start gap-3 rounded-md border border-gray-200 p-3">
+              <input
+                type="checkbox"
+                checked={useAiTitles}
+                onChange={(event) => setUseAiTitles(event.target.checked)}
+                className="mt-1 h-4 w-4"
+              />
+              <div>
+                <div className="text-sm font-medium text-gray-900">AI SEO Titles</div>
+                <div className="text-xs text-gray-500">
+                  Use `gpt-4o-mini` when `OPENAI_API_KEY` is configured. Falls back to keyword-merged titles.
+                </div>
+              </div>
+            </label>
 
             <div>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-3">

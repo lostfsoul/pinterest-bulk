@@ -4,10 +4,12 @@ CSV export router.
 import csv
 import os
 import random
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from urllib.parse import urljoin
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,9 @@ router = APIRouter()
 # Export directory
 EXPORT_DIR = Path(__file__).parent.parent.parent / "storage" / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+MAX_PINTEREST_TITLE_LENGTH = 100
+MAX_PINTEREST_DESCRIPTION_LENGTH = 500
 
 
 def calculate_publish_dates(
@@ -81,8 +86,37 @@ def calculate_publish_dates(
     return result
 
 
+def get_public_base_url(request: Request) -> str:
+    """Resolve the public base URL used for exported media URLs."""
+    configured_base = os.getenv("PUBLIC_BASE_URL") or os.getenv("APP_BASE_URL")
+    base_url = configured_base or str(request.base_url)
+    return base_url.rstrip("/") + "/"
+
+
+def build_public_media_url(media_url: str, request: Request) -> str:
+    """Convert stored local media paths into public absolute URLs."""
+    if media_url.startswith("http://") or media_url.startswith("https://"):
+        return media_url
+    return urljoin(get_public_base_url(request), media_url.lstrip("/"))
+
+
+def format_publish_date(publish_date: datetime) -> str:
+    """Format publish date in an ISO-like structure Pinterest accepts."""
+    return publish_date.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def normalize_board_name(board_name: str) -> str:
+    """Normalize board names for export using '-' as the separator."""
+    normalized = re.sub(r"\s*(/|\\\\|\||>|,)\s*", "-", board_name.strip())
+    normalized = re.sub(r"\s+", "-", normalized)
+    normalized = re.sub(r"\s*-\s*", "-", normalized)
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    return normalized
+
+
 @router.post("", response_model=ExportResponse)
 def export_csv(
+    http_request: Request,
     request: ExportRequest,
     db: Session = Depends(get_db),
 ):
@@ -137,14 +171,17 @@ def export_csv(
         ])
 
         for pin, publish_date in pins_with_dates:
-            # Format publish date
-            date_str = publish_date.strftime("%Y-%m-%d %H:%M")
+            public_media_url = build_public_media_url(pin.media_url or "", http_request)
+            date_str = format_publish_date(publish_date)
+            title = (pin.title or "")[:MAX_PINTEREST_TITLE_LENGTH]
+            description = (pin.description or "")[:MAX_PINTEREST_DESCRIPTION_LENGTH]
+            board_name = normalize_board_name(pin.board_name or "")
 
             writer.writerow([
-                pin.title or '',
-                pin.media_url or '',
-                pin.board_name or '',
-                pin.description or '',
+                title,
+                public_media_url,
+                board_name,
+                description,
                 pin.link or '',
                 date_str,
                 pin.keywords or '',

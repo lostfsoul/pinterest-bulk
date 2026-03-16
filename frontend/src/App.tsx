@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import './index.css';
+import apiClient from './services/api';
 
 // Lazy load pages
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -13,6 +14,7 @@ const Generate = lazy(() => import('./pages/Generate'));
 const Schedule = lazy(() => import('./pages/Schedule'));
 const Export = lazy(() => import('./pages/Export'));
 const Activity = lazy(() => import('./pages/Activity'));
+const Login = lazy(() => import('./pages/Login'));
 
 function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   const location = useLocation();
@@ -32,7 +34,13 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
   );
 }
 
-function Layout({ children }: { children: React.ReactNode }) {
+function Layout({
+  children,
+  onLogout,
+}: {
+  children: React.ReactNode;
+  onLogout: () => Promise<void>;
+}) {
   return (
     <div className="flex min-h-screen bg-gray-50">
       {/* Sidebar */}
@@ -57,6 +65,14 @@ function Layout({ children }: { children: React.ReactNode }) {
         <div className="pt-4 border-t border-gray-200 text-xs text-gray-500">
           <p>Local filesystem storage</p>
           <p>SQLite database</p>
+          <button
+            onClick={() => {
+              void onLogout();
+            }}
+            className="mt-3 text-sm font-medium text-blue-600 hover:text-blue-800"
+          >
+            Logout
+          </button>
         </div>
       </aside>
 
@@ -71,9 +87,50 @@ function Layout({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+
+  useEffect(() => {
+    loadAuthStatus().catch((error) => {
+      console.error('Failed to load auth status:', error);
+      setAuthLoading(false);
+    });
+  }, []);
+
+  async function loadAuthStatus() {
+    const response = await apiClient.authStatus();
+    setAuthEnabled(response.data.enabled);
+    setAuthenticated(response.data.authenticated || !response.data.enabled);
+    setAuthLoading(false);
+  }
+
+  async function handleLogout() {
+    try {
+      await apiClient.logout();
+    } finally {
+      setAuthenticated(false);
+      setAuthEnabled(true);
+    }
+  }
+
+  if (authLoading) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-500">Loading...</div>;
+  }
+
+  if (authEnabled && !authenticated) {
+    return (
+      <BrowserRouter>
+        <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-gray-500">Loading...</div>}>
+          <Login onAuthenticated={() => setAuthenticated(true)} />
+        </Suspense>
+      </BrowserRouter>
+    );
+  }
+
   return (
     <BrowserRouter>
-      <Layout>
+      <Layout onLogout={handleLogout}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/websites" element={<Websites />} />
