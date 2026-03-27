@@ -90,10 +90,32 @@ function drawCoverCenter(ctx, img, zoneX, zoneY, zoneW, zoneH) {
 }
 
 /**
+ * Safely convert text to uppercase, handling Unicode properly
+ */
+function safeUpperCase(text) {
+    // Remove characters that toUpperCase() can't handle (produces �)
+    // This includes certain emojis, special symbols, and problematic unicode
+    const safe = text.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028\u2029\u2060\uFE00-\uFE0F]/g, '');
+    try {
+        return safe.toUpperCase();
+    } catch (e) {
+        // Fallback for any remaining issues
+        return safe.replace(/[^\x00-\x7F]/g, '').toUpperCase();
+    }
+}
+
+/**
  * Fit title text into zone with optimal font size and line breaks
  */
 function fitTitle(ctx, text, zoneW, zoneH, fontFamily) {
-    const upper = text.toUpperCase();
+    // Normalize font family string for canvas
+    fontFamily = fontFamily
+        .replace(/^["']|["']$/g, '')
+        .replace(/["']/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const upper = safeUpperCase(text);
     const usableW = zoneW - 30; // 15px padding each side
     const usableH = zoneH;
     const words = upper.split(' ');
@@ -266,8 +288,16 @@ async function renderPin(renderData) {
         const title = content.title || '';
         if (title) {
             console.error(`[DEBUG] Drawing title: "${title}"`);
-            const fontFamily = settings.fontFamily || '"Bebas Neue", Impact, sans-serif';
+            let fontFamily = settings.fontFamily || '"Bebas Neue", Impact, sans-serif';
             const textColor = settings.textColor || '#000000';
+
+            // Normalize font family string - handle quoted font names for canvas
+            // Canvas expects font names without surrounding quotes, or with proper escaping
+            fontFamily = fontFamily
+                .replace(/^["']|["']$/g, '') // Remove surrounding quotes
+                .replace(/["']/g, ' ')        // Replace inner quotes with space
+                .replace(/\s+/g, ' ')          // Collapse multiple spaces
+                .trim();
 
             const { lines, fontSize } = fitTitle(
                 ctx,

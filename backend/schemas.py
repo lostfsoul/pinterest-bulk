@@ -2,7 +2,7 @@
 Pydantic schemas for request/response validation.
 """
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -53,6 +53,8 @@ class PageResponse(BaseModel):
     title: str | None
     section: str | None
     sitemap_source: str | None
+    sitemap_bucket: str | None
+    is_utility_page: bool
     is_enabled: bool
     scraped_at: datetime | None
     created_at: datetime
@@ -84,6 +86,37 @@ class KeywordRow(BaseModel):
     """Single keyword row from CSV."""
     url: str
     keywords: str
+    period_type: Literal["always", "month", "season"] = "always"
+    period_value: str | None = None
+
+
+class KeywordStatusResponse(BaseModel):
+    """Keyword status with period breakdown."""
+    total_pages: int
+    pages_with_keywords: int
+    total_keywords: int
+    coverage_percent: float
+    by_period_type: dict[str, int]
+
+
+class KeywordEntryResponse(BaseModel):
+    """Single keyword entry with page metadata."""
+    id: int
+    page_id: int
+    website_id: int
+    website_name: str
+    page_title: str | None
+    page_url: str
+    keyword: str
+    period_type: Literal["always", "month", "season"]
+    period_value: str | None
+
+
+class KeywordEntryUpdate(BaseModel):
+    """Update keyword entry."""
+    keyword: str
+    period_type: Literal["always", "month", "season"] = "always"
+    period_value: str | None = None
 
 
 # =============================================================================
@@ -127,11 +160,20 @@ class TemplateWithZones(TemplateResponse):
 # =============================================================================
 
 class PageImageResponse(BaseModel):
-    """Schema for page image response."""
+    """Schema for page image response with enhanced metadata."""
     id: int
     page_id: int
     url: str
     is_excluded: bool
+    width: int | None
+    height: int | None
+    file_size: int | None
+    mime_type: str | None
+    format: str | None
+    is_article_image: bool
+    is_hq: bool
+    category: str
+    excluded_by_global_rule: bool
     created_at: datetime
 
     class Config:
@@ -156,6 +198,9 @@ class ImagePageSummary(BaseModel):
     url: str
     title: str | None
     is_enabled: bool
+    is_utility_page: bool
+    sitemap_source: str | None
+    sitemap_bucket: str
     scraped_at: datetime | None
     created_at: datetime
     section: str
@@ -175,6 +220,36 @@ class ImageBatchScrapeResponse(BaseModel):
     scraped: int
     failed: int
     errors: list[str]
+
+
+# =============================================================================
+# Global Exclusion Schemas
+# =============================================================================
+
+class GlobalExcludedImageResponse(BaseModel):
+    """Schema for global exclusion rule response."""
+    id: int
+    url_pattern: str | None
+    name_pattern: str | None
+    reason: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class GlobalExcludedImageCreate(BaseModel):
+    """Schema for creating a global exclusion rule."""
+    url_pattern: str | None = None
+    name_pattern: str | None = None
+    reason: str = "other"
+
+
+class GlobalExcludedImageApplyResponse(BaseModel):
+    """Response after applying an exclusion rule to existing images."""
+    rule_id: int
+    matched: int
+    applied: bool
 
 
 # =============================================================================
@@ -273,7 +348,7 @@ class ScheduleSettingsUpdate(BaseModel):
     pins_per_day: int = Field(ge=1, le=100)
     start_hour: int = Field(ge=0, le=23)
     end_hour: int = Field(ge=0, le=23)
-    min_days_reuse: int = Field(ge=1, le=365)
+    min_days_reuse: int = Field(ge=31, le=365)
     random_minutes: bool
 
 
@@ -372,3 +447,80 @@ class AnalyticsSummary(BaseModel):
     pins_skipped: int
     exports_count: int
     exports_pins_total: int
+
+
+# =============================================================================
+# AI Preset Schemas
+# =============================================================================
+
+class AIPromptPresetBase(BaseModel):
+    """Base schema for AI prompt preset."""
+    name: str = Field(..., min_length=1, max_length=255)
+    target_field: str = Field(..., pattern="^(title|description|board)$")
+    prompt_template: str
+    model: str = "gpt-4o-mini"
+    temperature: float = Field(default=0.4, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=4000)
+    language: str = "English"
+    is_default: bool = False
+
+
+class AIPromptPresetCreate(AIPromptPresetBase):
+    """Schema for creating an AI prompt preset."""
+    pass
+
+
+class AIPromptPresetUpdate(BaseModel):
+    """Schema for updating an AI prompt preset."""
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    target_field: str | None = Field(default=None, pattern="^(title|description|board)$")
+    prompt_template: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=4000)
+    language: str | None = None
+    is_default: bool | None = None
+
+
+class AIPromptPresetResponse(BaseModel):
+    """Schema for AI prompt preset response."""
+    id: int
+    name: str
+    target_field: str
+    prompt_template: str
+    model: str
+    temperature: float
+    max_tokens: int | None
+    language: str
+    is_default: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# =============================================================================
+# AI Settings Schemas
+# =============================================================================
+
+class AISettingsResponse(BaseModel):
+    """Schema for AI settings response."""
+    id: int
+    default_title_preset_id: int | None
+    default_description_preset_id: int | None
+    default_board_preset_id: int | None
+    default_language: str
+    use_ai_by_default: bool
+
+    class Config:
+        from_attributes = True
+
+
+class AISettingsUpdate(BaseModel):
+    """Schema for updating AI settings."""
+    default_title_preset_id: int | None = None
+    default_description_preset_id: int | None = None
+    default_board_preset_id: int | None = None
+    default_language: str | None = None
+    use_ai_by_default: bool | None = None

@@ -61,10 +61,10 @@ export default function Websites() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Websites</h1>
-          <p className="text-gray-500 mt-1">Manage websites and import pages from sitemaps</p>
+          <h1 className="text-2xl font-black uppercase text-black font-mono">Websites</h1>
+          <p className="text-gray-600 mt-1 font-bold font-mono">Manage websites and import pages from sitemaps</p>
         </div>
         <Button onClick={() => setShowForm(!showForm)}>
           {showForm ? 'Cancel' : 'Add Website'}
@@ -72,10 +72,10 @@ export default function Websites() {
       </div>
 
       {showForm && (
-        <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="bg-white border-2 border-black shadow-brutal p-4 sm:p-6">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-bold text-black mb-1">
                 Name
               </label>
               <input
@@ -83,12 +83,12 @@ export default function Websites() {
                 required
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border-2 border-black focus:outline-none focus:shadow-brutal-sm"
                 placeholder="My Blog"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-bold text-black mb-1">
                 Website URL
               </label>
               <input
@@ -96,23 +96,23 @@ export default function Websites() {
                 required
                 value={formData.url}
                 onChange={(e) => setFormData({ ...formData, url: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border-2 border-black focus:outline-none focus:shadow-brutal-sm"
                 placeholder="https://example.com"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-bold text-black mb-1">
                 Sitemap URL (optional)
               </label>
               <input
                 type="url"
                 value={formData.sitemap_url}
                 onChange={(e) => setFormData({ ...formData, sitemap_url: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 border-2 border-black focus:outline-none focus:shadow-brutal-sm"
                 placeholder="https://example.com/sitemap.xml"
               />
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button type="submit" disabled={submitting}>
                 {submitting ? 'Creating...' : 'Create Website'}
               </Button>
@@ -125,53 +125,57 @@ export default function Websites() {
       )}
 
       {websites.length === 0 ? (
-        <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
-          <p className="text-gray-500">No websites yet. Add your first website to get started.</p>
+        <div className="bg-white border-2 border-black shadow-brutal p-8 sm:p-12 text-center">
+          <p className="text-gray-500 font-mono">No websites yet. Add your first website to get started.</p>
         </div>
       ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">URL</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Pages</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {websites.map((website) => (
-                <tr key={website.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-gray-900">{website.name}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-500 truncate max-w-xs">{website.url}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="text-sm text-gray-900">
-                      {website.enabled_pages_count || 0} / {website.pages_count || 0}
-                    </span>
-                    <span className="text-xs text-gray-500 ml-1">enabled</span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <button
-                      onClick={() => navigate(`/websites/${website.id}`)}
-                      className="text-blue-600 hover:text-blue-800 mr-4"
-                    >
-                      View
-                    </button>
-                    <button
-                      onClick={() => handleDelete(website.id)}
-                      className="text-red-600 hover:text-red-800"
-                    >
-                      Delete
-                    </button>
-                  </td>
+        <div className="bg-white border-2 border-black shadow-brutal overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[500px]">
+              <thead className="bg-bg-secondary border-b-2 border-black">
+                <tr>
+                  <th className="px-4 sm:px-6 py-3 text-left text-xs font-black uppercase">Name</th>
+                  <th className="px-4 sm:px-6 py-3 text-left text-xs font-black uppercase hidden sm:table-cell">URL</th>
+                  <th className="px-4 sm:px-6 py-3 text-left text-xs font-black uppercase">Pages</th>
+                  <th className="px-4 sm:px-6 py-3 text-left text-xs font-black uppercase">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-black">
+                {websites.map((website) => (
+                  <tr key={website.id} className="hover:bg-bg-secondary">
+                    <td className="px-4 sm:px-6 py-4">
+                      <div className="text-sm font-bold text-black">{website.name}</div>
+                    </td>
+                    <td className="px-4 sm:px-6 py-4 hidden sm:table-cell">
+                      <div className="text-sm text-gray-600 truncate max-w-[150px] lg:max-w-xs">{website.url}</div>
+                    </td>
+                    <td className="px-4 sm:px-6 py-4">
+                      <span className="text-sm font-bold text-black">
+                        {website.enabled_pages_count || 0} / {website.pages_count || 0}
+                      </span>
+                      <span className="text-xs text-gray-500 ml-1 hidden sm:inline">enabled</span>
+                    </td>
+                    <td className="px-4 sm:px-6 py-4">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => navigate(`/websites/${website.id}`)}
+                          className="text-xs sm:text-sm font-bold uppercase hover:opacity-80"
+                        >
+                          View
+                        </button>
+                        <button
+                          onClick={() => handleDelete(website.id)}
+                          className="text-xs sm:text-sm font-bold uppercase text-red-600 hover:opacity-80"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

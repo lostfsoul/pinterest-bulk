@@ -9,7 +9,7 @@ export default function Schedule() {
     pins_per_day: 10,
     start_hour: 8,
     end_hour: 20,
-    min_days_reuse: 7,
+    min_days_reuse: 31,
     random_minutes: true,
   });
 
@@ -119,14 +119,14 @@ export default function Schedule() {
             </label>
             <input
               type="number"
-              min="1"
+              min="31"
               max="365"
               value={formData.min_days_reuse}
               onChange={(e) => setFormData({ ...formData, min_days_reuse: Number(e.target.value) })}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <p className="text-xs text-gray-500 mt-1">
-              Days to wait before scheduling another pin for the same URL
+              Minimum is 31 days. The scheduler will never reuse the same URL before 31 days.
             </p>
           </div>
 

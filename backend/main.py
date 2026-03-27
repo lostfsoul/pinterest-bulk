@@ -78,6 +78,7 @@ from routers import (
     schedule,
     export,
     analytics,
+    ai_presets,
 )
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
@@ -89,6 +90,7 @@ app.include_router(pins.router, prefix="/api/pins", tags=["pins"])
 app.include_router(schedule.router, prefix="/api/schedule", tags=["schedule"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
+app.include_router(ai_presets.router, prefix="/api/ai-presets", tags=["ai-presets"])
 
 
 # =============================================================================

@@ -21,6 +21,10 @@ def get_schedule_settings(db: Session = Depends(get_db)):
         db.add(settings)
         db.commit()
         db.refresh(settings)
+    elif settings.min_days_reuse < 31:
+        settings.min_days_reuse = 31
+        db.commit()
+        db.refresh(settings)
 
     return settings
 

@@ -84,16 +84,16 @@ export default function WebsiteDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <button
             onClick={() => navigate('/websites')}
-            className="text-sm text-blue-600 hover:text-blue-800 mb-2"
+            className="text-sm font-bold hover:opacity-80 mb-2"
           >
-            ← Back to Websites
+            ← Back
           </button>
-          <h1 className="text-2xl font-bold text-gray-900">{website.name}</h1>
-          <p className="text-gray-500 mt-1">{website.url}</p>
+          <h1 className="text-2xl font-black uppercase text-black font-mono">{website.name}</h1>
+          <p className="text-gray-600 mt-1 font-bold font-mono truncate max-w-xs sm:max-w-none">{website.url}</p>
         </div>
         <Button onClick={handleImportSitemap} disabled={importing || !website.sitemap_url}>
           {importing ? 'Importing...' : 'Import Sitemap'}
@@ -101,14 +101,14 @@ export default function WebsiteDetail() {
       </div>
 
       {importResult && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <h3 className="font-semibold text-blue-900 mb-2">Sitemap Import Complete</h3>
-          <p className="text-sm text-blue-800">
+        <div className="bg-blue-100 border-2 border-black p-4">
+          <h3 className="font-black text-blue-900 mb-2">Sitemap Import Complete</h3>
+          <p className="text-sm font-bold text-blue-800">
             Found {importResult.total_urls} pages: {importResult.new_pages} new, {importResult.updated_pages} updated.
           </p>
           {importResult.errors.length > 0 && (
             <details className="mt-2">
-              <summary className="text-sm text-red-700 cursor-pointer">Errors ({importResult.errors.length})</summary>
+              <summary className="text-sm font-bold text-red-700 cursor-pointer">Errors ({importResult.errors.length})</summary>
               <ul className="mt-2 text-xs text-red-600 list-disc list-inside">
                 {importResult.errors.map((error, i) => <li key={i}>{error}</li>)}
               </ul>
@@ -118,49 +118,49 @@ export default function WebsiteDetail() {
       )}
 
       {!website.sitemap_url && (
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-          <p className="text-sm text-yellow-800">
-            ⚠️ No sitemap configured. This website will use <code>/sitemap.xml</code> by default. Click "Import Sitemap" to try importing pages.
+        <div className="bg-yellow-100 border-2 border-black p-4">
+          <p className="text-sm font-bold text-yellow-800">
+            ⚠️ No sitemap configured. This website will use <code className="bg-yellow-200 px-1">/sitemap.xml</code> by default. Click "Import Sitemap" to try importing pages.
           </p>
         </div>
       )}
 
       {pages.length === 0 && website.sitemap_url && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <p className="text-sm text-blue-800">
-            📄 No pages imported yet. Click the "Import Sitemap" button above to fetch pages from <code className="bg-blue-100 px-1 rounded">{website.sitemap_url}</code>
+        <div className="bg-blue-100 border-2 border-black p-4">
+          <p className="text-sm font-bold text-blue-800">
+            📄 No pages imported yet. Click the "Import Sitemap" button above to fetch pages from <code className="bg-blue-200 px-1 break-all">{website.sitemap_url}</code>
           </p>
         </div>
       )}
 
-      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
-          <h2 className="text-lg font-semibold text-gray-900">
+      <div className="bg-white border-2 border-black shadow-brutal overflow-hidden">
+        <div className="px-4 sm:px-6 py-4 border-b-2 border-black bg-bg-secondary">
+          <h2 className="text-lg font-black uppercase text-black">
             Pages ({pages.length})
           </h2>
         </div>
-        <div className="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
+        <div className="divide-y divide-black max-h-[400px] sm:max-h-[600px] overflow-y-auto">
           {pages.length === 0 ? (
-            <div className="px-6 py-12 text-center text-gray-500">
+            <div className="px-4 sm:px-6 py-8 sm:py-12 text-center text-gray-500 font-mono">
               No pages yet. Import from sitemap to get started.
             </div>
           ) : (
             pages.map((page) => (
-              <div key={page.id} className="px-6 py-4 hover:bg-gray-50 flex items-center gap-4">
+              <div key={page.id} className="px-4 sm:px-6 py-3 sm:py-4 hover:bg-bg-secondary flex items-center gap-3 sm:gap-4">
                 <input
                   type="checkbox"
                   checked={page.is_enabled}
                   onChange={() => togglePageEnabled(page.id, page.is_enabled)}
-                  className="h-4 w-4 text-blue-600 rounded focus:ring-blue-500"
+                  className="h-4 w-4 accent-accent flex-shrink-0"
                 />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">
+                  <p className="text-sm font-bold text-black truncate">
                     {page.title || 'Untitled'}
                   </p>
                   <p className="text-xs text-gray-500 truncate">{page.url}</p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`text-xs px-2 py-1 rounded ${
+                <div className="flex-shrink-0">
+                  <span className={`text-xs px-2 py-1 border border-black rounded ${
                     page.scraped_at ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
                   }`}>
                     {page.scraped_at ? 'Scraped' : 'Not scraped'}

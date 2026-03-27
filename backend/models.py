@@ -41,6 +41,8 @@ class Page(Base):
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     section: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sitemap_source: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    sitemap_bucket: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_utility_page: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     scraped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -68,6 +70,8 @@ class PageKeyword(Base):
         Integer, ForeignKey("pages.id"), nullable=False, index=True
     )
     keyword: Mapped[str] = mapped_column(String(255), nullable=False)
+    period_type: Mapped[str] = mapped_column(String(20), default="always", nullable=False)
+    period_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     page: Mapped["Page"] = relationship("Page", back_populates="keywords")
 
@@ -124,11 +128,33 @@ class PageImage(Base):
     )
     url: Mapped[str] = mapped_column(String(2048), nullable=False)
     is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)  # bytes
+    mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    format: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_article_image: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_hq: Mapped[bool] = mapped_column(Boolean, default=False)
+    category: Mapped[str] = mapped_column(String(50), default="other")  # article|featured|other
+    excluded_by_global_rule: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
 
     page: Mapped["Page"] = relationship("Page", back_populates="images")
+
+
+class GlobalExcludedImage(Base):
+    """Global exclusion rules for images."""
+    __tablename__ = "global_excluded_images"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    url_pattern: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    name_pattern: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason: Mapped[str] = mapped_column(String(50))  # affiliate|logo|tracking|icon|ad|other
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
 
 class PinDraft(Base):
@@ -179,7 +205,7 @@ class ScheduleSettings(Base):
     pins_per_day: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
     start_hour: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
     end_hour: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
-    min_days_reuse: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    min_days_reuse: Mapped[int] = mapped_column(Integer, default=31, nullable=False)
     random_minutes: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -230,3 +256,42 @@ class ActivityLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
+
+
+class AIPromptPreset(Base):
+    """AI prompt preset for customizable generation."""
+    __tablename__ = "ai_prompt_presets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_field: Mapped[str] = mapped_column(String(50), nullable=False)  # title | description | board
+    prompt_template: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(50), default="gpt-4o-mini", nullable=False)
+    temperature: Mapped[float] = mapped_column(Float, default=0.4, nullable=False)
+    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    language: Mapped[str] = mapped_column(String(50), default="English", nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class AISettings(Base):
+    """Singleton AI settings."""
+    __tablename__ = "ai_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    default_title_preset_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ai_prompt_presets.id"), nullable=True
+    )
+    default_description_preset_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ai_prompt_presets.id"), nullable=True
+    )
+    default_board_preset_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ai_prompt_presets.id"), nullable=True
+    )
+    default_language: Mapped[str] = mapped_column(String(50), default="English", nullable=False)
+    use_ai_by_default: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

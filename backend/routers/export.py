@@ -27,61 +27,81 @@ MAX_PINTEREST_TITLE_LENGTH = 100
 MAX_PINTEREST_DESCRIPTION_LENGTH = 500
 
 
+def build_daily_slots(day_start: datetime, settings: ScheduleSettings) -> list[datetime]:
+    """Build publish slots for a single day."""
+    window_start = day_start.replace(
+        hour=settings.start_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    window_end = day_start.replace(
+        hour=settings.end_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if window_end <= window_start:
+        window_end = window_start + timedelta(hours=1)
+
+    slots_count = max(1, settings.pins_per_day)
+    window_seconds = max(60, int((window_end - window_start).total_seconds()))
+    slots: list[datetime] = []
+
+    for i in range(slots_count):
+        bucket_start_seconds = int(i * window_seconds / slots_count)
+        bucket_end_seconds = int((i + 1) * window_seconds / slots_count)
+        if bucket_end_seconds <= bucket_start_seconds:
+            bucket_end_seconds = bucket_start_seconds + 1
+
+        if settings.random_minutes:
+            slot_seconds = random.randint(bucket_start_seconds, bucket_end_seconds - 1)
+        else:
+            slot_seconds = bucket_start_seconds
+
+        slot = window_start + timedelta(seconds=slot_seconds)
+        if slot >= window_end:
+            slot = window_end - timedelta(seconds=1)
+
+        slots.append(slot.replace(microsecond=0))
+
+    return sorted(slots)
+
+
 def calculate_publish_dates(
     pins: List[PinDraft],
     settings: ScheduleSettings,
 ) -> List[tuple[PinDraft, datetime]]:
     """Calculate publish dates for pins based on schedule settings."""
-    result = []
-    current_date = datetime.now().replace(minute=0, second=0, microsecond=0)
-    current_date = current_date.replace(hour=settings.start_hour)
-
-    pins_by_url = {}
-    for pin in pins:
-        url = pin.link or ""
-        if url not in pins_by_url:
-            pins_by_url[url] = []
-        pins_by_url[url].append(pin)
-
-    url_last_used = {}
-
-    # Sort pins to distribute URLs
+    result: list[tuple[PinDraft, datetime]] = []
+    url_last_used: dict[str, datetime] = {}
     sorted_pins = sorted(pins, key=lambda p: p.link or "")
+    min_days_reuse = max(31, settings.min_days_reuse)
+
+    day_pointer = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_slots = build_daily_slots(day_pointer, settings)
+    slot_index = 0
 
     for pin in sorted_pins:
-        # Find next available slot
-        while True:
-            # Check if we've exceeded end hour
-            if current_date.hour >= settings.end_hour:
-                # Move to next day
-                current_date = current_date + timedelta(days=1)
-                current_date = current_date.replace(hour=settings.start_hour)
+        url = pin.link or ""
 
-            # Check if URL was used recently
-            url = pin.link or ""
-            last_used = url_last_used.get(url)
-            if last_used and (current_date - last_used).days < settings.min_days_reuse:
-                # Skip to next available day
-                current_date = current_date + timedelta(days=1)
-                current_date = current_date.replace(hour=settings.start_hour)
+        while True:
+            if slot_index >= len(day_slots):
+                day_pointer = day_pointer + timedelta(days=1)
+                day_slots = build_daily_slots(day_pointer, settings)
+                slot_index = 0
                 continue
 
+            candidate = day_slots[slot_index]
+            slot_index += 1
+
+            last_used = url_last_used.get(url)
+            if last_used and (candidate.date() - last_used.date()).days < min_days_reuse:
+                continue
+
+            result.append((pin, candidate))
+            url_last_used[url] = candidate
             break
-
-        # Add random minutes if enabled
-        publish_date = current_date
-        if settings.random_minutes:
-            publish_date = publish_date.replace(
-                minute=random.randint(0, 59)
-            )
-
-        result.append((pin, publish_date))
-        url_last_used[url] = publish_date
-
-        # Move to next slot
-        current_date = current_date + timedelta(hours=24 // settings.pins_per_day)
-        if settings.random_minutes:
-            current_date = current_date.replace(minute=0)
 
     return result
 

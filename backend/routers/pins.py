@@ -1,6 +1,7 @@
 """
 Pin draft generation and management router.
 """
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from database import get_db, SessionLocal
-from models import Page, PageImage, PageKeyword, PinDraft, Template, ActivityLog
+from models import Page, PageImage, PageKeyword, PinDraft, Template, ActivityLog, AIPromptPreset, AISettings, Website
 from schemas import (
     PinDraftResponse,
     PinDraftUpdate,
@@ -32,6 +33,18 @@ class PinRegenerateRequest(BaseModel):
     """Request for regenerating all pins for a template."""
     template_id: int
     settings: Optional[PinRenderSettings] = None
+
+
+class PinAIGenerationOverrides(BaseModel):
+    """Override AI presets for a specific generation."""
+    title_preset_id: int | None = None
+    description_preset_id: int | None = None
+    board_preset_id: int | None = None
+
+
+class PinGenerateRequestExtended(PinGenerateRequest):
+    """Extended request for pin generation with AI overrides."""
+    ai_overrides: PinAIGenerationOverrides | None = None
 
 
 # =============================================================================
@@ -121,6 +134,19 @@ def merge_pin_settings(pin: PinDraft, request_settings: Optional[PinRenderSettin
     return settings
 
 
+def sanitize_generated_text(value: str | None) -> str:
+    """Normalize generated text to plain printable ASCII and collapse whitespace."""
+    if not value:
+        return ""
+
+    cleaned = value.replace("\uFFFD", " ")
+    cleaned = cleaned.replace("\r", " ").replace("\n", " ")
+    cleaned = re.sub(r"[\x00-\x1F\x7F-\x9F]", " ", cleaned)
+    cleaned = re.sub(r"[^\x20-\x7E]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def generate_pin_description(page: Page, keywords: List[str]) -> str:
     """Generate a pin description from page and keywords."""
     parts = []
@@ -134,7 +160,63 @@ def generate_pin_description(page: Page, keywords: List[str]) -> str:
     if page.url:
         parts.append(f"Read more at the link below.")
 
-    return "\n\n".join(parts) if parts else ""
+    return sanitize_generated_text("\n\n".join(parts) if parts else "")
+
+
+def _derive_active_season_from_month(active_month: str) -> str | None:
+    """Derive meteorological season for Northern Hemisphere from month name."""
+    season_by_month = {
+        "december": "winter",
+        "january": "winter",
+        "february": "winter",
+        "march": "spring",
+        "april": "spring",
+        "may": "spring",
+        "june": "summer",
+        "july": "summer",
+        "august": "summer",
+        "september": "autumn",
+        "october": "autumn",
+        "november": "autumn",
+    }
+    return season_by_month.get(active_month)
+
+
+def select_keywords_for_generation(page_keywords: List[PageKeyword]) -> List[str]:
+    """Prioritize active month, then active season, then always, then fallback."""
+    active_month = datetime.utcnow().strftime("%B").lower()
+    active_season = _derive_active_season_from_month(active_month)
+    month_keywords: list[str] = []
+    season_keywords: list[str] = []
+    always_keywords: list[str] = []
+    fallback_keywords: list[str] = []
+
+    for item in page_keywords:
+        keyword = (item.keyword or "").strip()
+        if not keyword:
+            continue
+
+        period_type = (item.period_type or "always").strip().lower()
+        period_value = (item.period_value or "").strip().lower()
+        if period_type == "month" and period_value == active_month:
+            month_keywords.append(keyword)
+        elif period_type == "season" and active_season and period_value == active_season:
+            season_keywords.append(keyword)
+        elif period_type == "always":
+            always_keywords.append(keyword)
+        else:
+            fallback_keywords.append(keyword)
+
+    if month_keywords:
+        ordered = month_keywords + [k for k in season_keywords if k not in month_keywords]
+        ordered += [k for k in always_keywords if k not in ordered]
+        return ordered
+    if season_keywords:
+        ordered = season_keywords + [k for k in always_keywords if k not in season_keywords]
+        return ordered
+    if always_keywords:
+        return always_keywords
+    return fallback_keywords
 
 
 def generate_pin_titles(
@@ -142,8 +224,33 @@ def generate_pin_titles(
     keywords: List[str],
     image_count: int,
     use_ai_titles: bool,
+    preset: Optional[AIPromptPreset] = None,
+    language: str = "English",
+    website_name: str = "",
 ) -> list[str]:
     """Generate one title per image for the page."""
+    from services.ai_generation import generate_title_variants
+
+    if use_ai_titles and preset:
+        titles = generate_title_variants(
+            page_title=page.title,
+            keywords=keywords,
+            count=image_count,
+            preset={
+                "prompt_template": preset.prompt_template,
+                "model": preset.model,
+                "temperature": preset.temperature,
+                "max_tokens": preset.max_tokens,
+                "language": language,
+            },
+            website_name=website_name,
+            url=page.url,
+            section=page.section or "",
+        )
+        if titles:
+            return titles
+
+    # Fallback to original behavior
     from services.seo_titles import (
         build_fallback_pin_title_variants,
         generate_ai_pin_title_variants,
@@ -155,6 +262,95 @@ def generate_pin_titles(
             return titles
 
     return build_fallback_pin_title_variants(page.title, keywords, image_count)
+
+
+def get_preset_for_target(
+    db: Session,
+    target_field: str,
+    preset_id: Optional[int] = None,
+    settings: Optional[AISettings] = None,
+) -> Optional[AIPromptPreset]:
+    """Get a preset for a target field, using override or default."""
+    if preset_id:
+        return db.query(AIPromptPreset).filter(AIPromptPreset.id == preset_id).first()
+
+    if settings:
+        if target_field == "title":
+            preset_id = settings.default_title_preset_id
+        elif target_field == "description":
+            preset_id = settings.default_description_preset_id
+        elif target_field == "board":
+            preset_id = settings.default_board_preset_id
+
+    if preset_id:
+        return db.query(AIPromptPreset).filter(AIPromptPreset.id == preset_id).first()
+
+    return None
+
+
+def generate_description_ai(
+    page: Page,
+    keywords: List[str],
+    preset: Optional[AIPromptPreset] = None,
+    language: str = "English",
+    website_name: str = "",
+) -> str:
+    """Generate description using AI preset or fallback."""
+    from services.ai_generation import generate_description
+
+    if preset:
+        result = generate_description(
+            page_title=page.title,
+            keywords=keywords,
+            preset={
+                "prompt_template": preset.prompt_template,
+                "model": preset.model,
+                "temperature": preset.temperature,
+                "max_tokens": preset.max_tokens,
+                "language": language,
+            },
+            website_name=website_name,
+            url=page.url,
+            section=page.section or "",
+            description="",
+        )
+        if result:
+            return sanitize_generated_text(result)
+
+    return generate_pin_description(page, keywords)
+
+
+def generate_board_name_ai(
+    page: Page,
+    keywords: List[str],
+    preset: Optional[AIPromptPreset] = None,
+    language: str = "English",
+    default_board: str = "General",
+    website_name: str = "",
+) -> str:
+    """Generate board name using AI preset or fallback."""
+    from services.ai_generation import generate_board_name
+
+    if preset:
+        result = generate_board_name(
+            page_title=page.title,
+            keywords=keywords,
+            preset={
+                "prompt_template": preset.prompt_template,
+                "model": preset.model,
+                "temperature": preset.temperature,
+                "max_tokens": preset.max_tokens,
+                "language": language,
+            },
+            website_name=website_name,
+            url=page.url,
+            section=page.section or "",
+            description="",
+        )
+        if result:
+            return sanitize_generated_text(result)
+
+    return sanitize_generated_text(default_board)
 
 
 @router.post("/generate", response_model=List[PinDraftResponse])
@@ -172,21 +368,45 @@ def generate_pins(
         raise HTTPException(status_code=404, detail="Template not found")
     render_settings = build_render_settings(template, request.render_settings)
 
+    # Get AI settings and presets
+    ai_settings = db.query(AISettings).first()
+    title_preset = None
+    description_preset = None
+    board_preset = None
+
+    if ai_settings and ai_settings.use_ai_by_default:
+        title_preset = get_preset_for_target(db, "title", settings=ai_settings)
+        description_preset = get_preset_for_target(db, "description", settings=ai_settings)
+        board_preset = get_preset_for_target(db, "board", settings=ai_settings)
+    default_language = (ai_settings.default_language if ai_settings else None) or "English"
+
     # Get pages to generate pins for
     if request.page_ids:
-        pages = db.query(Page).filter(Page.id.in_(request.page_ids)).all()
+        pages = (
+            db.query(Page)
+            .filter(Page.id.in_(request.page_ids), Page.is_enabled == True)
+            .all()
+        )
     else:
         pages = db.query(Page).filter(Page.is_enabled == True).all()
 
     if not pages:
         raise HTTPException(status_code=400, detail="No pages found")
 
+    # Pre-fetch website names for pages
+    page_website_names: dict[int, str] = {}
+    website_ids = set(p.website_id for p in pages)
+    if website_ids:
+        websites = db.query(Website).filter(Website.id.in_(website_ids)).all()
+        page_website_names = {w.id: w.name for w in websites}
+
     pins_created = 0
     all_new_pins = []
 
     for page in pages:
         # Get keywords
-        keywords = [k.keyword for k in page.keywords]
+        keywords = select_keywords_for_generation(page.keywords)
+        website_name = page_website_names.get(page.website_id, "")
 
         # Get ALL non-excluded images for this page
         images = (
@@ -194,7 +414,26 @@ def generate_pins(
             .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
             .all()
         )
-        pin_titles = generate_pin_titles(page, keywords, len(images), request.use_ai_titles)
+        pin_titles = generate_pin_titles(
+            page, keywords, len(images), request.use_ai_titles,
+            preset=title_preset, language=default_language, website_name=website_name
+        )
+        pin_titles = [sanitize_generated_text(title) for title in pin_titles]
+        pin_description = generate_description_ai(
+            page,
+            keywords,
+            preset=description_preset,
+            language=default_language,
+            website_name=website_name,
+        )
+        pin_board = generate_board_name_ai(
+            page,
+            keywords,
+            preset=board_preset,
+            language=default_language,
+            default_board=request.board_name,
+            website_name=website_name,
+        )
 
         # Get existing pins for this page
         existing_pins = (
@@ -210,15 +449,15 @@ def generate_pins(
         for index, image in enumerate(images):
             # Check if a pin already exists for this image
             existing_pin = existing_pins_by_url.get(image.url)
-            pin_title = pin_titles[index] if index < len(pin_titles) else (page.title or "")
+            pin_title = pin_titles[index] if index < len(pin_titles) else sanitize_generated_text(page.title or "")
 
             if existing_pin:
                 # Update existing pin
                 existing_pin.template_id = template.id
                 existing_pin.selected_image_url = image.url
                 existing_pin.title = pin_title
-                existing_pin.description = generate_pin_description(page, keywords)
-                existing_pin.board_name = request.board_name
+                existing_pin.description = pin_description
+                existing_pin.board_name = pin_board
                 existing_pin.link = page.url
                 existing_pin.media_url = None  # Will be generated when rendered
                 existing_pin.keywords = ", ".join(keywords)
@@ -235,8 +474,8 @@ def generate_pins(
                     template_id=template.id,
                     selected_image_url=image.url,
                     title=pin_title,
-                    description=generate_pin_description(page, keywords),
-                    board_name=request.board_name,
+                    description=pin_description,
+                    board_name=pin_board,
                     link=page.url,
                     media_url=None,  # Will be generated when rendered
                     keywords=", ".join(keywords),
@@ -313,11 +552,11 @@ def update_pin(
         raise HTTPException(status_code=404, detail="Pin draft not found")
 
     if update.title is not None:
-        pin.title = update.title
+        pin.title = sanitize_generated_text(update.title)
     if update.description is not None:
-        pin.description = update.description
+        pin.description = sanitize_generated_text(update.description)
     if update.board_name is not None:
-        pin.board_name = update.board_name
+        pin.board_name = sanitize_generated_text(update.board_name)
     if update.keywords is not None:
         pin.keywords = update.keywords
     if update.text_zone_y is not None:

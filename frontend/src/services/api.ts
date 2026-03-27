@@ -25,6 +25,8 @@ export interface Page {
   title: string | null;
   section: string | null;
   sitemap_source: string | null;
+  sitemap_bucket: string | null;
+  is_utility_page: boolean;
   is_enabled: boolean;
   scraped_at: string | null;
   created_at: string;
@@ -55,6 +57,23 @@ export interface PageImage {
   page_id: number;
   url: string;
   is_excluded: boolean;
+  width: number | null;
+  height: number | null;
+  file_size: number | null;
+  mime_type: string | null;
+  format: string | null;
+  is_article_image: boolean;
+  is_hq: boolean;
+  category: 'article' | 'featured' | 'other';
+  excluded_by_global_rule: boolean;
+  created_at: string;
+}
+
+export interface GlobalExcludedImage {
+  id: number;
+  url_pattern: string | null;
+  name_pattern: string | null;
+  reason: 'affiliate' | 'logo' | 'tracking' | 'icon' | 'ad' | 'other';
   created_at: string;
 }
 
@@ -65,6 +84,9 @@ export interface ImagePageSummary {
   url: string;
   title: string | null;
   is_enabled: boolean;
+  is_utility_page: boolean;
+  sitemap_source: string | null;
+  sitemap_bucket: string;
   scraped_at: string | null;
   created_at: string;
   section: string;
@@ -149,6 +171,46 @@ export interface AuthStatus {
   enabled: boolean;
 }
 
+export interface AIPromptPreset {
+  id: number;
+  name: string;
+  target_field: 'title' | 'description' | 'board';
+  prompt_template: string;
+  model: string;
+  temperature: number;
+  max_tokens: number | null;
+  language: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AISettings {
+  id: number;
+  default_title_preset_id: number | null;
+  default_description_preset_id: number | null;
+  default_board_preset_id: number | null;
+  default_language: string;
+  use_ai_by_default: boolean;
+}
+
+export interface KeywordEntry {
+  id: number;
+  page_id: number;
+  website_id: number;
+  website_name: string;
+  page_title: string | null;
+  page_url: string;
+  keyword: string;
+  period_type: 'always' | 'month' | 'season';
+  period_value: string | null;
+}
+
+export interface PlaceholderInfo {
+  placeholders: Array<{ name: string; description: string }>;
+  languages: string[];
+}
+
 // API Functions
 export const apiClient = {
   // Health check
@@ -186,7 +248,16 @@ export const apiClient = {
     pages_with_keywords: number;
     total_keywords: number;
     coverage_percent: number;
+    by_period_type: Record<string, number>;
   }>('/keywords'),
+  listKeywordEntries: (params?: { website_id?: number; period_type?: 'always' | 'month' | 'season'; search?: string; limit?: number }) =>
+    api.get<KeywordEntry[]>('/keywords/entries', { params }),
+  updateKeywordEntry: (id: number, data: {
+    keyword: string;
+    period_type: 'always' | 'month' | 'season';
+    period_value?: string | null;
+  }) => api.patch<KeywordEntry>(`/keywords/entries/${id}`, data),
+  deleteKeywordEntry: (id: number) => api.delete(`/keywords/entries/${id}`),
 
   // Templates
   listTemplates: () => api.get<Template[]>('/templates'),
@@ -211,7 +282,7 @@ export const apiClient = {
 
   // Images
   scrapePageImages: (pageId: number) => api.post<PageImage[]>(`/images/pages/${pageId}/scrape`),
-  listImagePages: (params?: { website_id?: number; scrape_status?: string; search?: string; section?: string }) =>
+  listImagePages: (params?: { website_id?: number; scrape_status?: string; search?: string; section?: string; sitemap_bucket?: string }) =>
     api.get<ImagePageSummary[]>('/images/pages', { params }),
   scrapePagesBatch: (page_ids: number[]) =>
     api.post<{ total: number; scraped: number; failed: number; errors: string[] }>('/images/pages/scrape', { page_ids }),
@@ -221,6 +292,14 @@ export const apiClient = {
     api.patch<PageImage>(`/images/images/${id}`, data),
   getPendingPages: () => api.get<Array<{ id: number; url: string; title: string | null; website_id: number }>>('/images/pending'),
   getImageStats: () => api.get<{ total: number; excluded: number; available: number }>('/images/stats'),
+
+  // Global Exclusions
+  listGlobalExclusions: () => api.get<GlobalExcludedImage[]>('/images/global-exclusions'),
+  createGlobalExclusion: (data: { url_pattern?: string; name_pattern?: string; reason: string }) =>
+    api.post<GlobalExcludedImage>('/images/global-exclusions', data),
+  deleteGlobalExclusion: (id: number) => api.delete(`/images/global-exclusions/${id}`),
+  applyGlobalExclusion: (id: number) =>
+    api.post<{ rule_id: number; matched: number; applied: boolean }>(`/images/global-exclusions/${id}/apply`),
 
   // Pins
   generatePins: (data: {
@@ -283,6 +362,41 @@ export const apiClient = {
     created_at: string;
   }>>('/export/history'),
   downloadExport: (filename: string) => `${API_BASE}/export/download/${filename}`,
+
+  // AI Presets
+  listAIPresets: () => api.get<AIPromptPreset[]>('/ai-presets'),
+  createAIPreset: (data: {
+    name: string;
+    target_field: 'title' | 'description' | 'board';
+    prompt_template: string;
+    model?: string;
+    temperature?: number;
+    max_tokens?: number | null;
+    language?: string;
+    is_default?: boolean;
+  }) => api.post<AIPromptPreset>('/ai-presets', data),
+  getAIPreset: (id: number) => api.get<AIPromptPreset>(`/ai-presets/${id}`),
+  updateAIPreset: (id: number, data: {
+    name?: string;
+    target_field?: 'title' | 'description' | 'board';
+    prompt_template?: string;
+    model?: string;
+    temperature?: number;
+    max_tokens?: number | null;
+    language?: string;
+    is_default?: boolean;
+  }) => api.put<AIPromptPreset>(`/ai-presets/${id}`, data),
+  deleteAIPreset: (id: number) => api.delete(`/ai-presets/${id}`),
+  setDefaultAIPreset: (id: number) => api.post<AIPromptPreset>(`/ai-presets/${id}/set-default`),
+  getAISettings: () => api.get<AISettings>('/ai-presets/settings'),
+  updateAISettings: (data: {
+    default_title_preset_id?: number | null;
+    default_description_preset_id?: number | null;
+    default_board_preset_id?: number | null;
+    default_language?: string;
+    use_ai_by_default?: boolean;
+  }) => api.put<AISettings>('/ai-presets/settings', data),
+  getPlaceholderInfo: () => api.get<PlaceholderInfo>('/ai-presets/placeholders'),
 
   // Analytics
   getAnalyticsSummary: () => api.get<AnalyticsSummary>('/analytics/summary'),

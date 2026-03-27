@@ -87,6 +87,27 @@ function findMaxFontSize(
   return best;
 }
 
+function safeUpperCase(text: string): string {
+  // Remove characters that toUpperCase() can't handle properly
+  // This includes certain emojis, special symbols, and problematic unicode
+  const safe = text.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u2028\u2029\u2060\uFE00-\uFE0F]/g, '');
+  try {
+    return safe.toUpperCase();
+  } catch (e) {
+    // Fallback for any remaining issues
+    return safe.replace(/[^\x00-\x7F]/g, '').toUpperCase();
+  }
+}
+
+function normalizeFontFamily(fontFamily: string): string {
+  // Normalize font family string - handle quoted font names for canvas
+  return fontFamily
+    .replace(/^["']|["']$/g, '')
+    .replace(/["']/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function fitTitle(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -94,7 +115,10 @@ function fitTitle(
   zoneHeight: number,
   fontFamily: string,
 ) {
-  const upper = text.toUpperCase();
+  // Normalize font family for canvas
+  fontFamily = normalizeFontFamily(fontFamily);
+
+  const upper = safeUpperCase(text);
   const usableWidth = zoneWidth - 30;
   const usableHeight = zoneHeight;
   const words = upper.split(' ');
@@ -191,6 +215,8 @@ export function PinPreview({
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const normalizedFont = normalizeFontFamily(settings.fontFamily);
+
     const render = async () => {
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, template.width, template.height);
@@ -255,16 +281,30 @@ export function PinPreview({
         ctx.restore();
       }
 
+      // Wait for fonts to be loaded before drawing text
+      try {
+        await document.fonts.ready;
+        // Try to load the specific font if it's a custom font
+        const fontToLoad = normalizedFont.split(',')[0].trim();
+        if (fontToLoad && fontToLoad !== 'sans-serif' && fontToLoad !== 'serif' && fontToLoad !== 'monospace') {
+          await document.fonts.load(`900 48px "${fontToLoad}"`).catch(() => {
+            // Font might not be available, continue anyway
+          });
+        }
+      } catch (e) {
+        // Continue even if font loading fails
+      }
+
       const { lines, fontSize } = fitTitle(
         ctx,
         title,
         textAreaWidth,
         settings.textZoneHeight,
-        settings.fontFamily,
+        normalizedFont,
       );
       const lineHeight = fontSize;
       const centerX = settings.textZonePadLeft + textAreaWidth / 2;
-      ctx.font = `900 ${fontSize}px ${settings.fontFamily}`;
+      ctx.font = `900 ${fontSize}px ${normalizedFont}`;
       ctx.fillStyle = settings.textColor;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'alphabetic';
@@ -282,7 +322,7 @@ export function PinPreview({
     render().catch((error) => {
       console.error('Failed to render preview:', error);
     });
-  }, [borderColor, borderWidth, imageUrls, loading, settings, template, templateSvg, title]);
+  }, [borderColor, borderWidth, imageUrls, loading, settings.fontFamily, settings.textColor, settings.textZoneHeight, settings.textZonePadLeft, settings.textZonePadRight, settings.textZoneY, template, templateSvg, title]);
 
   useEffect(() => {
     if (!onZoneChange) return undefined;

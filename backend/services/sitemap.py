@@ -10,6 +10,69 @@ from database import SessionLocal
 from models import Page, Website, ImportLog
 from schemas import SitemapImportResponse
 
+GENERIC_SITEMAP_SECTIONS = {
+    "post",
+    "posts",
+    "page",
+    "pages",
+    "attachment",
+    "attachments",
+    "author",
+    "authors",
+    "tag",
+    "tags",
+    "category",
+    "categories",
+    "product",
+    "products",
+    "sitemap",
+    "wp",
+    "wordpress",
+}
+
+SITEMAP_BUCKET_ALIASES = {
+    "post": "post",
+    "posts": "post",
+    "page": "page",
+    "pages": "page",
+    "category": "category",
+    "categories": "category",
+    "tag": "tag",
+    "tags": "tag",
+    "product": "product",
+    "products": "product",
+    "author": "author",
+    "authors": "author",
+    "attachment": "attachment",
+    "attachments": "attachment",
+    "story": "web-story",
+    "stories": "web-story",
+    "web-story": "web-story",
+    "web-stories": "web-story",
+    "video": "video",
+    "videos": "video",
+}
+
+UTILITY_URL_PATTERNS = [
+    r"/about(?:-|_)?(?:us)?/?$",
+    r"/contact(?:-|_)?(?:us)?/?$",
+    r"/privacy(?:-|_)?policy/?$",
+    r"/terms(?:-|_)?(?:and|&)?(?:-|_)?conditions?/?$",
+    r"/cookie(?:-|_)?policy/?$",
+    r"/disclaimer/?$",
+    r"/affiliate(?:-|_)?disclosure/?$",
+    r"/refund(?:-|_)?policy/?$",
+    r"/shipping(?:-|_)?policy/?$",
+    r"/login/?$",
+    r"/register/?$",
+    r"/my-account/?$",
+    r"/cart/?$",
+    r"/checkout/?$",
+    r"/search/?$",
+    r"/feed/?$",
+    r"/author/[^/]+/?$",
+]
+
 
 async def fetch_sitemap(sitemap_url: str) -> str | None:
     """Fetch sitemap XML content."""
@@ -29,16 +92,130 @@ def derive_section_from_sitemap_url(sitemap_url: str) -> str | None:
     if not filename:
         return None
 
-    filename = re.sub(r"\.xml(?:\.gz)?$", "", filename)
-    filename = filename.replace("sitemap-", "").replace("-sitemap", "")
-    filename = filename.replace("_", "-")
+    filename = re.sub(r"\.xml(?:\.gz)?$", "", filename).replace("_", "-")
+    filename = re.sub(r"-?sitemap\d*$", "", filename)
+    filename = re.sub(r"-{2,}", "-", filename).strip("-")
+    if not filename:
+        return None
 
-    noisy_tokens = {"post", "posts", "page", "pages", "index", "1", "2", "3"}
-    parts = [part for part in filename.split("-") if part and part not in noisy_tokens]
+    parts = [part for part in filename.split("-") if part]
+    noisy_tokens = {"index", "main"}
+    if "category" in parts:
+        idx = parts.index("category")
+        tail = [p for p in parts[idx + 1:] if p not in noisy_tokens]
+        if tail:
+            return " ".join(tail)
+
+    if "tag" in parts:
+        idx = parts.index("tag")
+        tail = [p for p in parts[idx + 1:] if p not in noisy_tokens]
+        if tail:
+            return " ".join(tail)
+
+    parts = [part for part in parts if part not in noisy_tokens]
     if not parts:
         return None
 
     return " ".join(parts)
+
+
+def derive_sitemap_bucket_from_source(sitemap_url: str | None) -> str:
+    """Infer canonical sitemap bucket from sitemap source URL."""
+    if not sitemap_url:
+        return "unknown"
+
+    filename = urlparse(sitemap_url).path.rsplit("/", 1)[-1].lower()
+    filename = re.sub(r"\.xml(?:\.gz)?$", "", filename).replace("_", "-")
+    if not filename:
+        return "unknown"
+
+    # Typical Yoast/RankMath style: post-sitemap1, page-sitemap, category-sitemap
+    normalized = re.sub(r"-?sitemap\d*$", "", filename)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+    if normalized:
+        direct = SITEMAP_BUCKET_ALIASES.get(normalized)
+        if direct:
+            return direct
+
+    tokens = [token for token in filename.split("-") if token]
+    if not tokens:
+        return "unknown"
+
+    # WordPress core style: wp-sitemap-posts-post-1
+    if len(tokens) >= 4 and tokens[0] == "wp" and tokens[1] == "sitemap":
+        for token in tokens[2:]:
+            mapped = SITEMAP_BUCKET_ALIASES.get(token)
+            if mapped:
+                return mapped
+
+    # Generic: pick first recognized token from filename.
+    for token in tokens:
+        mapped = SITEMAP_BUCKET_ALIASES.get(token)
+        if mapped:
+            return mapped
+
+    # Keep bucket space tight for generation UX.
+    return "other"
+
+
+def is_generation_eligible_default(sitemap_bucket: str, is_utility_page: bool) -> bool:
+    """Conservative default eligibility for generation after sitemap import."""
+    if is_utility_page:
+        return False
+    return sitemap_bucket == "post"
+
+
+def derive_section_from_page_url(page_url: str) -> str | None:
+    """Infer category-like section from a content URL, tuned for WordPress permalinks."""
+    path_parts = [part for part in urlparse(page_url).path.split("/") if part]
+    if not path_parts:
+        return None
+
+    lowered_parts = [part.lower() for part in path_parts]
+    if "category" in lowered_parts:
+        idx = lowered_parts.index("category")
+        if idx + 1 < len(path_parts):
+            return path_parts[idx + 1].replace("-", " ").replace("_", " ").lower()
+
+    filtered: list[str] = []
+    for part in lowered_parts:
+        if re.fullmatch(r"\d{4}", part):
+            continue
+        if re.fullmatch(r"\d{1,2}", part):
+            continue
+        if part == "amp":
+            continue
+        filtered.append(part)
+
+    # Single non-date slug is usually the post permalink itself; avoid using it as category.
+    if len(filtered) <= 1:
+        return None
+
+    return filtered[0].replace("-", " ").replace("_", " ")
+
+
+def is_utility_page_url(page_url: str, sitemap_bucket: str) -> bool:
+    """Detect utility pages that should be imported but disabled by default."""
+    path = urlparse(page_url).path.lower()
+    if sitemap_bucket in {"category", "tag", "author", "attachment"}:
+        return True
+    return any(re.search(pattern, path) for pattern in UTILITY_URL_PATTERNS)
+
+
+def resolve_page_section(page_url: str, sitemap_source: str | None) -> str:
+    """Choose a stable page section from sitemap metadata and URL structure."""
+    sitemap_section = derive_section_from_sitemap_url(sitemap_source or "")
+    if sitemap_section and sitemap_section not in GENERIC_SITEMAP_SECTIONS:
+        return sitemap_section
+
+    url_section = derive_section_from_page_url(page_url)
+    if url_section:
+        return url_section
+
+    if sitemap_section:
+        return sitemap_section
+
+    return "uncategorized"
 
 
 def parse_sitemap_xml(xml_content: str, base_url: str = "") -> list[str]:
@@ -257,10 +434,31 @@ async def import_sitemap(website_id: int, db: Session) -> SitemapImportResponse:
     for entry in page_urls:
         url = entry["url"] or ""
         try:
+            sitemap_source = entry.get("sitemap_source")
+            sitemap_bucket = derive_sitemap_bucket_from_source(sitemap_source)
+            next_section = resolve_page_section(url, sitemap_source)
+            is_utility_page = is_utility_page_url(url, sitemap_bucket)
+            should_enable = is_generation_eligible_default(sitemap_bucket, is_utility_page)
+
             # Check if this URL already exists for this website
             if url in existing_urls:
-                # Already exists for this website, skip
-                skipped_pages += 1
+                existing_page = existing_urls[url]
+                next_source = sitemap_source
+                if (
+                    existing_page.section != next_section
+                    or existing_page.sitemap_source != next_source
+                    or existing_page.sitemap_bucket != sitemap_bucket
+                    or existing_page.is_utility_page != is_utility_page
+                    or existing_page.is_enabled != should_enable
+                ):
+                    existing_page.section = next_section
+                    existing_page.sitemap_source = next_source
+                    existing_page.sitemap_bucket = sitemap_bucket
+                    existing_page.is_utility_page = is_utility_page
+                    existing_page.is_enabled = should_enable
+                    updated_pages += 1
+                else:
+                    skipped_pages += 1
                 continue
 
             # Check if URL exists for another website
@@ -269,8 +467,11 @@ async def import_sitemap(website_id: int, db: Session) -> SitemapImportResponse:
                 existing_page = db.query(Page).filter(Page.url == url).first()
                 if existing_page:
                     existing_page.website_id = website_id
-                    existing_page.section = entry.get("section")
-                    existing_page.sitemap_source = entry.get("sitemap_source")
+                    existing_page.section = next_section
+                    existing_page.sitemap_source = sitemap_source
+                    existing_page.sitemap_bucket = sitemap_bucket
+                    existing_page.is_utility_page = is_utility_page
+                    existing_page.is_enabled = should_enable
                     existing_urls[url] = existing_page
                     updated_pages += 1
                 continue
@@ -284,9 +485,11 @@ async def import_sitemap(website_id: int, db: Session) -> SitemapImportResponse:
                 website_id=website_id,
                 url=url,
                 title=title,
-                section=entry.get("section"),
-                sitemap_source=entry.get("sitemap_source"),
-                is_enabled=True,
+                section=next_section,
+                sitemap_source=sitemap_source,
+                sitemap_bucket=sitemap_bucket,
+                is_utility_page=is_utility_page,
+                is_enabled=should_enable,
             )
             db.add(page)
             existing_urls[url] = page  # Track to avoid duplicates in this batch
