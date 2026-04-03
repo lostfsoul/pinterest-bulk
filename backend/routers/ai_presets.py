@@ -1,6 +1,7 @@
 """
 AI prompt presets router for managing customizable AI generation prompts.
 """
+import os
 from datetime import datetime
 from typing import Dict, List, Any
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,36 @@ from schemas import (
 from services.ai_generation import AVAILABLE_PLACEHOLDERS, LANGUAGE_OPTIONS
 
 router = APIRouter()
+
+MODEL_ALLOWLIST = [
+    {"id": "gpt-4o-mini", "provider": "openai", "label": "GPT-4o Mini"},
+    {"id": "gpt-4o", "provider": "openai", "label": "GPT-4o"},
+    {"id": "gpt-4.1-mini", "provider": "openai", "label": "GPT-4.1 Mini"},
+    {"id": "gpt-4.1", "provider": "openai", "label": "GPT-4.1"},
+    {"id": "claude-3-5-haiku-latest", "provider": "anthropic", "label": "Claude 3.5 Haiku"},
+    {"id": "claude-3-7-sonnet-latest", "provider": "anthropic", "label": "Claude 3.7 Sonnet"},
+]
+
+
+def _provider_has_key(provider: str) -> bool:
+    if provider == "openai":
+        return bool(os.getenv("OPENAI_API_KEY"))
+    if provider == "anthropic":
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
+    return False
+
+
+def _is_model_allowed(model: str) -> bool:
+    return any(item["id"] == model for item in MODEL_ALLOWLIST)
+
+
+def _validate_model_availability(model: str) -> None:
+    match = next((item for item in MODEL_ALLOWLIST if item["id"] == model), None)
+    if not match:
+        raise HTTPException(status_code=400, detail=f"Model '{model}' is not in allowlist")
+    provider = match["provider"]
+    if not _provider_has_key(provider):
+        raise HTTPException(status_code=400, detail=f"{provider} provider is not configured on server")
 
 
 # =============================================================================
@@ -85,6 +116,20 @@ def list_placeholders():
     }
 
 
+@router.get("/models")
+def list_models():
+    """List allowed AI models and provider availability."""
+    return {
+        "models": [
+            {
+                **item,
+                "available": _provider_has_key(item["provider"]),
+            }
+            for item in MODEL_ALLOWLIST
+        ]
+    }
+
+
 # =============================================================================
 # AI Presets CRUD (/{preset_id} routes must come after specific routes)
 # =============================================================================
@@ -98,6 +143,7 @@ def list_presets(db: Session = Depends(get_db)):
 @router.post("", response_model=AIPromptPresetResponse)
 def create_preset(preset: AIPromptPresetCreate, db: Session = Depends(get_db)):
     """Create a new AI prompt preset."""
+    _validate_model_availability(preset.model)
     db_preset = AIPromptPreset(
         name=preset.name,
         target_field=preset.target_field,
@@ -148,6 +194,7 @@ def update_preset(
     if update.prompt_template is not None:
         preset.prompt_template = update.prompt_template
     if update.model is not None:
+        _validate_model_availability(update.model)
         preset.model = update.model
     if update.temperature is not None:
         preset.temperature = update.temperature

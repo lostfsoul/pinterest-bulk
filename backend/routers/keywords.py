@@ -79,6 +79,16 @@ SEASON_ALIASES = {
 }
 
 
+def normalize_keyword_role(keyword_role: str | None) -> str:
+    """Normalize keyword role from CSV/UI."""
+    role = (keyword_role or "seo").strip().lower()
+    if role in {"article", "seo"}:
+        return "seo"
+    if role in {"selection", "detect", "match"}:
+        return "selection"
+    raise ValueError("keyword_role must be one of: selection, seo")
+
+
 def normalize_period(period_type: str | None, period_value: str | None) -> tuple[str, str | None]:
     """Normalize period fields from CSV."""
     normalized_type = (period_type or "always").strip().lower()
@@ -146,6 +156,7 @@ async def upload_keywords_csv(
     # Find url and keywords columns
     url_col = next((header_map.get(h) for h in ("url", "article_url", "article url") if header_map.get(h)), None)
     keywords_col = next((header_map.get(h) for h in ("keywords", "keyword", "tags") if header_map.get(h)), None)
+    role_col = next((header_map.get(h) for h in ("keyword_role", "role", "type_role") if header_map.get(h)), None)
     period_type_col = next(
         (header_map.get(h) for h in ("period_type", "period type", "type") if header_map.get(h)),
         None,
@@ -168,8 +179,8 @@ async def upload_keywords_csv(
     duplicates_skipped = 0
     errors: List[str] = []
     matched_page_ids: set[int] = set()
-    keyword_sets: dict[tuple[int, str, str | None], set[str]] = defaultdict(set)
-    keyword_sets_folded: dict[tuple[int, str, str | None], set[str]] = defaultdict(set)
+    keyword_sets: dict[tuple[int, str, str, str | None], set[str]] = defaultdict(set)
+    keyword_sets_folded: dict[tuple[int, str, str, str | None], set[str]] = defaultdict(set)
 
     # Get all existing pages
     pages = db.query(Page).all()
@@ -181,6 +192,7 @@ async def upload_keywords_csv(
         try:
             raw_url = row.get(url_col, '').strip()
             keywords_str = row.get(keywords_col, '').strip()
+            keyword_role = row.get(role_col, "").strip() if role_col else "seo"
             period_type = row.get(period_type_col, "").strip() if period_type_col else "always"
             period_value = row.get(period_value_col, "").strip() if period_value_col else None
 
@@ -200,11 +212,12 @@ async def upload_keywords_csv(
                 unmatched_urls.append(raw_url)
                 continue
 
+            normalized_role = normalize_keyword_role(keyword_role)
             normalized_type, normalized_value = normalize_period(period_type, period_value)
             incoming_keywords = split_keywords(keywords_str)
 
-            bucket = keyword_sets[(page.id, normalized_type, normalized_value)]
-            bucket_folded = keyword_sets_folded[(page.id, normalized_type, normalized_value)]
+            bucket = keyword_sets[(page.id, normalized_role, normalized_type, normalized_value)]
+            bucket_folded = keyword_sets_folded[(page.id, normalized_role, normalized_type, normalized_value)]
             for keyword in incoming_keywords[:10]:
                 keyword_folded = keyword.casefold()
                 if keyword_folded in bucket_folded:
@@ -222,12 +235,13 @@ async def upload_keywords_csv(
         db.query(PageKeyword).filter(PageKeyword.page_id == page_id).delete()
 
     inserted = 0
-    for (page_id, normalized_type, normalized_value), keywords in keyword_sets.items():
+    for (page_id, normalized_role, normalized_type, normalized_value), keywords in keyword_sets.items():
         for keyword in list(keywords)[:10]:
             db.add(
                 PageKeyword(
                     page_id=page_id,
                     keyword=keyword,
+                    keyword_role=normalized_role,
                     period_type=normalized_type,
                     period_value=normalized_value,
                 )
@@ -283,6 +297,14 @@ def get_keywords_status(db: Session = Depends(get_db)) -> KeywordStatusResponse:
             .all()
         )
     }
+    by_role = {
+        role: count
+        for role, count in (
+            db.query(PageKeyword.keyword_role, func.count(PageKeyword.id))
+            .group_by(PageKeyword.keyword_role)
+            .all()
+        )
+    }
 
     return KeywordStatusResponse(
         total_pages=total_pages,
@@ -292,12 +314,14 @@ def get_keywords_status(db: Session = Depends(get_db)) -> KeywordStatusResponse:
             (pages_with_keywords / total_pages * 100) if total_pages > 0 else 0, 1
         ),
         by_period_type=by_period_type,
+        by_role=by_role,
     )
 
 
 @router.get("/entries", response_model=list[KeywordEntryResponse])
 def list_keyword_entries(
     website_id: int | None = None,
+    keyword_role: str | None = Query(default=None, pattern="^(selection|seo)$"),
     period_type: str | None = Query(default=None, pattern="^(always|month|season)$"),
     search: str | None = None,
     limit: int = Query(default=500, ge=1, le=2000),
@@ -309,6 +333,7 @@ def list_keyword_entries(
             PageKeyword.id,
             PageKeyword.page_id,
             PageKeyword.keyword,
+            PageKeyword.keyword_role,
             PageKeyword.period_type,
             PageKeyword.period_value,
             Page.website_id,
@@ -323,6 +348,8 @@ def list_keyword_entries(
 
     if website_id is not None:
         query = query.filter(Page.website_id == website_id)
+    if keyword_role:
+        query = query.filter(PageKeyword.keyword_role == keyword_role)
     if period_type:
         query = query.filter(PageKeyword.period_type == period_type)
     if search:
@@ -343,6 +370,7 @@ def list_keyword_entries(
             page_title=row.page_title,
             page_url=row.page_url,
             keyword=row.keyword,
+            keyword_role=row.keyword_role,
             period_type=row.period_type,
             period_value=row.period_value,
         )
@@ -367,6 +395,7 @@ def update_keyword_entry(
         raise HTTPException(status_code=400, detail="Keyword cannot be empty")
 
     entry.keyword = keyword
+    entry.keyword_role = normalize_keyword_role(payload.keyword_role)
     entry.period_type = normalized_type
     entry.period_value = normalized_value
     db.commit()
@@ -376,6 +405,7 @@ def update_keyword_entry(
             PageKeyword.id,
             PageKeyword.page_id,
             PageKeyword.keyword,
+            PageKeyword.keyword_role,
             PageKeyword.period_type,
             PageKeyword.period_value,
             Page.website_id,
@@ -399,6 +429,7 @@ def update_keyword_entry(
         page_title=row.page_title,
         page_url=row.page_url,
         keyword=row.keyword,
+        keyword_role=row.keyword_role,
         period_type=row.period_type,
         period_value=row.period_value,
     )

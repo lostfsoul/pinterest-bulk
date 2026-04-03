@@ -1,7 +1,7 @@
 """
 Template management router for SVG uploads.
 """
-import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Template, TemplateZone
+from models import Template, TemplateZone, CustomFont
 from schemas import TemplateResponse, TemplateWithZones, TemplateZoneResponse
 from services.template_parser import parse_svg_template
 
@@ -21,15 +21,95 @@ router = APIRouter()
 # Storage directories
 STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "templates"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+FONT_DIR = Path(__file__).parent.parent.parent / "storage" / "fonts"
+FONT_DIR.mkdir(parents=True, exist_ok=True)
 
 OVERLAYS_DIR = Path(__file__).parent.parent.parent / "storage" / "overlays"
 OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
+
+TARGET_TEMPLATE_WIDTH = 750
+TARGET_TEMPLATE_HEIGHT = 1575
+
+
+def _scaled_template_zone_data(parsed: dict) -> tuple[float, float]:
+    scale_x = TARGET_TEMPLATE_WIDTH / parsed["width"] if parsed["width"] else 1.0
+    scale_y = TARGET_TEMPLATE_HEIGHT / parsed["height"] if parsed["height"] else 1.0
+    return scale_x, scale_y
+
+
+def _replace_template_zones(template: Template, parsed: dict, db: Session) -> None:
+    scale_x, scale_y = _scaled_template_zone_data(parsed)
+    text_zone = next((zone for zone in template.zones if zone.zone_type == "text"), None)
+    text_props = dict(text_zone.props or {}) if text_zone else {}
+
+    for zone in list(template.zones):
+        db.delete(zone)
+    db.flush()
+
+    for index, zone in enumerate(parsed["zones"]):
+        db.add(
+            TemplateZone(
+                template_id=template.id,
+                zone_type="image",
+                x=int(round(zone["x"] * scale_x)),
+                y=int(round(zone["y"] * scale_y)),
+                width=int(round(zone["width"] * scale_x)),
+                height=int(round(zone["height"] * scale_y)),
+                props={"zone_index": index},
+            )
+        )
+
+    db.add(
+        TemplateZone(
+            template_id=template.id,
+            zone_type="text",
+            x=int(round(parsed["text_zone_x"] * scale_x)),
+            y=int(round(parsed["text_zone_y"] * scale_y)),
+            width=int(round(parsed["text_zone_width"] * scale_x)),
+            height=int(round(parsed["text_zone_height"] * scale_y)),
+            props={
+                "border_color": parsed["text_zone_border_color"],
+                "border_width": parsed["text_zone_border_width"],
+                "text_color": text_props.get("text_color") or parsed["text_zone_text_color"],
+                "text_align": text_props.get("text_align") or parsed.get("text_zone_align") or "left",
+                "font_family": text_props.get("font_family") or '"Bebas Neue", Impact, sans-serif',
+                "text_effect": text_props.get("text_effect") or "none",
+                "text_effect_color": text_props.get("text_effect_color") or "#000000",
+                "text_effect_offset_x": text_props.get("text_effect_offset_x", 2),
+                "text_effect_offset_y": text_props.get("text_effect_offset_y", 2),
+                "text_effect_blur": text_props.get("text_effect_blur", 0),
+                "custom_font_file": text_props.get("custom_font_file"),
+            },
+        )
+    )
+
+
+def _refresh_template_zones_if_stale(template: Template, db: Session) -> bool:
+    template_path = STORAGE_DIR / template.filename
+    if not template_path.exists():
+        return False
+
+    parsed = parse_svg_template(template_path.read_text(encoding="utf-8"))
+    stored_image_zones = [zone for zone in template.zones if zone.zone_type == "image"]
+    if len(stored_image_zones) == len(parsed["zones"]):
+        return False
+
+    _replace_template_zones(template, parsed, db)
+    db.commit()
+    db.refresh(template)
+    return True
 
 
 @router.get("", response_model=List[TemplateWithZones])
 def list_templates(db: Session = Depends(get_db)):
     """List all templates with zones."""
-    return db.query(Template).order_by(Template.created_at.desc()).all()
+    templates = db.query(Template).order_by(Template.created_at.desc()).all()
+    changed = False
+    for template in templates:
+        changed = _refresh_template_zones_if_stale(template, db) or changed
+    if changed:
+        templates = db.query(Template).order_by(Template.created_at.desc()).all()
+    return templates
 
 
 @router.post("/upload", response_model=TemplateResponse, status_code=status.HTTP_201_CREATED)
@@ -115,41 +195,14 @@ async def upload_template(
         name=name,
         filename=filename,
         overlay_svg=overlay_filename,
-        width=parsed["width"],
-        height=parsed["height"],
+        width=TARGET_TEMPLATE_WIDTH,
+        height=TARGET_TEMPLATE_HEIGHT,
     )
     db.add(template)
     db.commit()
     db.refresh(template)
 
-    # Create image zones (detected from clipPath)
-    for i, zone in enumerate(parsed["zones"]):
-        zone_obj = TemplateZone(
-            template_id=template.id,
-            zone_type="image",
-            x=int(round(zone["x"])),
-            y=int(round(zone["y"])),
-            width=int(round(zone["width"])),
-            height=int(round(zone["height"])),
-            props={"zone_index": i},
-        )
-        db.add(zone_obj)
-
-    # Create text zone
-    text_zone = TemplateZone(
-        template_id=template.id,
-        zone_type="text",
-        x=0,
-        y=parsed["text_zone_y"],
-        width=parsed["width"],
-        height=parsed["text_zone_height"],
-        props={
-            "border_color": parsed["text_zone_border_color"],
-            "border_width": parsed["text_zone_border_width"],
-            "text_color": parsed["text_zone_text_color"],
-        },
-    )
-    db.add(text_zone)
+    _replace_template_zones(template, parsed, db)
 
     db.commit()
     db.refresh(template)
@@ -163,6 +216,7 @@ def get_template(template_id: int, db: Session = Depends(get_db)):
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
+    _refresh_template_zones_if_stale(template, db)
     return template
 
 
@@ -218,6 +272,43 @@ def delete_zone(template_id: int, zone_id: int, db: Session = Depends(get_db)):
     db.delete(zone)
     db.commit()
     return None
+
+
+@router.patch("/{template_id}/zones/{zone_id}", response_model=TemplateZoneResponse)
+def update_zone(
+    template_id: int,
+    zone_id: int,
+    x: int | None = Form(None),
+    y: int | None = Form(None),
+    width: int | None = Form(None),
+    height: int | None = Form(None),
+    props: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Update a zone position/size/props."""
+    zone = db.query(TemplateZone).filter(
+        TemplateZone.id == zone_id,
+        TemplateZone.template_id == template_id,
+    ).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+
+    if x is not None:
+        zone.x = x
+    if y is not None:
+        zone.y = y
+    if width is not None:
+        zone.width = width
+    if height is not None:
+        zone.height = height
+    if props is not None:
+        import json
+
+        zone.props = json.loads(props) if props else None
+
+    db.commit()
+    db.refresh(zone)
+    return zone
 
 
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -282,3 +373,86 @@ async def get_template_overlay(template_id: int, db: Session = Depends(get_db)):
         media_type="image/svg+xml",
         headers={"Content-Disposition": f'inline; filename="{template.name}_overlay.svg"'},
     )
+
+
+@router.get("/fonts/list")
+def list_fonts(db: Session = Depends(get_db)):
+    """List uploaded custom fonts."""
+    def _readable_family(record: CustomFont) -> str:
+        family = (record.family or "").strip()
+        if family and family.lower() != "custom font":
+            return family
+
+        original = (record.original_name or "").strip()
+        if original:
+            original_stem = Path(original).stem.strip()
+            # Ignore UUID-like placeholders.
+            if original_stem and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", original_stem.lower()):
+                return original_stem.replace("-", " ").replace("_", " ")
+
+        # Fallback for names like "<uuid>__font-name.otf".
+        file_stem = Path(record.filename or "").stem.strip()
+        if "__" in file_stem:
+            maybe_slug = file_stem.split("__", 1)[1].strip()
+            if maybe_slug:
+                return maybe_slug.replace("-", " ").replace("_", " ")
+
+        if file_stem and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", file_stem.lower()):
+            return file_stem.replace("-", " ").replace("_", " ")
+
+        return "Custom Font"
+
+    records = db.query(CustomFont).order_by(CustomFont.created_at.desc()).all()
+    items = []
+    for record in records:
+        path = FONT_DIR / record.filename
+        if not path.exists():
+            continue
+        family = _readable_family(record)
+        items.append({"filename": record.filename, "family": family})
+    return {"fonts": items}
+
+
+@router.post("/fonts/upload")
+async def upload_font(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload a custom font file for template text rendering."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in {".ttf", ".otf", ".woff", ".woff2"}:
+        raise HTTPException(status_code=400, detail="Supported formats: ttf, otf, woff, woff2")
+
+    original_stem = Path(file.filename).stem.strip()
+    pretty_family = original_stem.replace("-", " ").replace("_", " ") or "Custom Font"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", original_stem).strip("-").lower() or "custom-font"
+    file_id = str(uuid.uuid4())
+    safe_name = f"{file_id}__{slug}{suffix}"
+    dest = FONT_DIR / safe_name
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty font file")
+
+    with open(dest, "wb") as out:
+        out.write(content)
+    db_font = CustomFont(
+        filename=safe_name,
+        original_name=file.filename,
+        family=pretty_family,
+    )
+    db.add(db_font)
+    db.commit()
+
+    return {
+        "filename": safe_name,
+        "family": pretty_family,
+    }
+
+
+@router.get("/fonts/{filename}")
+def get_font_file(filename: str):
+    """Serve an uploaded custom font file."""
+    safe_name = Path(filename).name
+    font_path = FONT_DIR / safe_name
+    if not font_path.exists():
+        raise HTTPException(status_code=404, detail="Font not found")
+    return FileResponse(font_path)

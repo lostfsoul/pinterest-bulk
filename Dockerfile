@@ -44,7 +44,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libwebp7 \
     fontconfig \
     fonts-dejavu-core \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Download and install Google Fonts used by the app
+RUN mkdir -p /usr/share/fonts/truetype/google && \
+    curl -sL "https://github.com/googlefonts/bebas-neue/raw/main/fonts/BebasNeue-Regular.ttf" -o /usr/share/fonts/truetype/google/BebasNeue-Regular.ttf && \
+    curl -sL "https://github.com/googlefonts/montserrat/raw/main/fonts/ttf/Montserrat-Regular.ttf" -o /usr/share/fonts/truetype/google/Montserrat-Regular.ttf && \
+    curl -sL "https://github.com/googlefonts/montserrat/raw/main/fonts/ttf/Montserrat-Bold.ttf" -o /usr/share/fonts/truetype/google/Montserrat-Bold.ttf && \
+    curl -sL "https://github.com/googlefonts/playfair/raw/main/fonts/ttf/PlayfairDisplay-Regular.ttf" -o /usr/share/fonts/truetype/google/PlayfairDisplay-Regular.ttf && \
+    curl -sL "https://github.com/googlefonts/oswald/raw/main/fonts/ttf/Oswald-Regular.ttf" -o /usr/share/fonts/truetype/google/Oswald-Regular.ttf && \
+    curl -sL "https://github.com/googlefonts/oswald/raw/main/fonts/ttf/Oswald-Bold.ttf" -o /usr/share/fonts/truetype/google/Oswald-Bold.ttf && \
+    curl -sL "https://github.com/googlefonts/poppins/raw/main/fonts/ttf/Poppins-Regular.ttf" -o /usr/share/fonts/truetype/google/Poppins-Regular.ttf && \
+    curl -sL "https://github.com/googlefonts/poppins/raw/main/fonts/ttf/Poppins-Bold.ttf" -o /usr/share/fonts/truetype/google/Poppins-Bold.ttf && \
+    fc-cache -f
 
 WORKDIR /app
 

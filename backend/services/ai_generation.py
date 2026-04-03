@@ -10,6 +10,7 @@ import httpx
 MAX_PIN_TITLE_LENGTH = 100
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 AVAILABLE_PLACEHOLDERS = [
     {"name": "title", "description": "Page title"},
@@ -107,18 +108,51 @@ def substitute_placeholders(
     return result
 
 
-def call_openai(
+def call_model(
     prompt: str,
     model: str = DEFAULT_OPENAI_MODEL,
     temperature: float = 0.4,
     max_tokens: int | None = None,
 ) -> str | None:
-    """Call OpenAI API and return the response content."""
+    timeout = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "12"))
+    model_lower = (model or "").strip().lower()
+
+    if model_lower.startswith("claude-"):
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            return None
+        payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens or 1024,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        try:
+            response = httpx.post(
+                ANTHROPIC_API_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content_blocks = data.get("content") or []
+            if not content_blocks:
+                return None
+            text = "".join(block.get("text", "") for block in content_blocks if block.get("type") == "text")
+            return text or None
+        except Exception as exc:
+            print(f"Anthropic API call failed: {exc}")
+            return None
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
 
-    timeout = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
     payload: dict[str, Any] = {
         "model": model,
         "temperature": temperature,
@@ -162,13 +196,32 @@ def generate_with_preset(
     temperature = preset.get("temperature", 0.4)
     max_tokens = preset.get("max_tokens")
     language = preset.get("language", "English")
+    tone = clean_whitespace(str(preset.get("tone", "")))
+    cta_style = clean_whitespace(str(preset.get("cta_style", ""))).lower()
+    max_chars = preset.get("max_chars")
+    target_field = clean_whitespace(str(preset.get("target_field", ""))).lower()
 
     # Inject language instruction into prompt
     prompt = substitute_placeholders(template, context)
+    instructions: list[str] = []
     if language and language != "English":
-        prompt = f"[Generate content in {language}]\n\n{prompt}"
+        instructions.append(f"Generate content in {language}.")
+    if tone:
+        instructions.append(f"Use a {tone} tone.")
+    if cta_style in {"soft", "strong", "none"} and target_field in {"title", "description"}:
+        if cta_style == "none":
+            instructions.append("Do not use a call to action.")
+        elif cta_style == "soft":
+            instructions.append("Use a soft call to action.")
+        else:
+            instructions.append("Use a strong call to action.")
+    if isinstance(max_chars, int) and max_chars > 0:
+        instructions.append(f"Keep output under {max_chars} characters.")
 
-    result = call_openai(prompt, model=model, temperature=temperature, max_tokens=max_tokens)
+    if instructions:
+        prompt = f"[{' '.join(instructions)}]\n\n{prompt}"
+
+    result = call_model(prompt, model=model, temperature=temperature, max_tokens=max_tokens)
     return result.strip() if result else None
 
 

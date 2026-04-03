@@ -12,13 +12,14 @@ const path = require('path');
 
 // Check if canvas package is available
 let canvasAvailable = false;
-let Canvas, Image, ImageData;
+let Canvas, Image, ImageData, registerFont;
 
 try {
     const canvasModule = require('canvas');
     Canvas = canvasModule.Canvas;
     Image = canvasModule.Image;
     ImageData = canvasModule.ImageData;
+    registerFont = canvasModule.registerFont;
     canvasAvailable = true;
 } catch (e) {
     // Canvas not available, will exit gracefully
@@ -107,7 +108,7 @@ function safeUpperCase(text) {
 /**
  * Fit title text into zone with optimal font size and line breaks
  */
-function fitTitle(ctx, text, zoneW, zoneH, fontFamily) {
+function fitTitle(ctx, text, zoneW, zoneH, fontFamily, fontWeight = '900') {
     // Normalize font family string for canvas
     fontFamily = fontFamily
         .replace(/^["']|["']$/g, '')
@@ -127,7 +128,7 @@ function fitTitle(ctx, text, zoneW, zoneH, fontFamily) {
         let lo = 12, hi = 200, bestFs = 12;
         while (lo <= hi) {
             const mid = Math.floor((lo + hi) / 2);
-            ctx.font = `900 ${mid}px ${fontFamily}`;
+            ctx.font = `${fontWeight} ${mid}px ${fontFamily}`.trim();
             const lineH = mid * 1.0;
             const totalH = lines.length * lineH;
             const maxW = Math.max(...lines.map(l => ctx.measureText(l).width));
@@ -188,6 +189,113 @@ function drawStaticText(ctx, textElements) {
     }
 }
 
+function drawTextWithEffect(ctx, lines, centerX, firstBase, lineH, textColor, settings) {
+    const effect = settings.textEffect || 'none';
+    const effectColor = settings.textEffectColor || '#000000';
+    const offX = Number(settings.textEffectOffsetX || 2);
+    const offY = Number(settings.textEffectOffsetY || 2);
+    const blur = Number(settings.textEffectBlur || 0);
+
+    if (effect !== 'none') {
+        ctx.save();
+        ctx.fillStyle = effectColor;
+        ctx.strokeStyle = effectColor;
+        ctx.lineJoin = 'round';
+        for (let i = 0; i < lines.length; i++) {
+            const y = firstBase + i * lineH;
+            if (effect === 'drop') {
+                ctx.shadowColor = effectColor;
+                ctx.shadowBlur = blur;
+                ctx.fillText(lines[i], centerX + offX, y + offY);
+            } else if (effect === 'echo') {
+                ctx.fillText(lines[i], centerX + offX, y + offY);
+                ctx.fillText(lines[i], centerX - offX, y - offY);
+            } else if (effect === 'outline') {
+                ctx.lineWidth = Math.max(1, offX);
+                ctx.strokeText(lines[i], centerX, y);
+            }
+        }
+        ctx.restore();
+    }
+
+    ctx.fillStyle = textColor;
+    ctx.textAlign = settings.textAlign === 'left' ? 'left' : 'center';
+    const textX = settings.textAlign === 'left'
+        ? (settings.textZonePadLeft || 0) + 15
+        : centerX;
+    for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], textX, firstBase + i * lineH);
+    }
+}
+
+function parseNumericAttr(tag, name) {
+    const re = new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'i');
+    const m = tag.match(re);
+    if (!m) return null;
+    const v = Number(m[1]);
+    return Number.isFinite(v) ? v : null;
+}
+
+function parseStringAttr(tag, name) {
+    const re = new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'i');
+    const m = tag.match(re);
+    return m ? String(m[1]) : null;
+}
+
+function parseSvgCoordinateSpace(svgContent) {
+    const open = (svgContent || '').match(/<svg\b[^>]*>/i);
+    if (!open) return null;
+    const tag = open[0];
+    const width = parseNumericAttr(tag, 'width');
+    const height = parseNumericAttr(tag, 'height');
+    const viewBox = parseStringAttr(tag, 'viewBox');
+    if (viewBox) {
+        const parts = viewBox.trim().split(/[\s,]+/).map((v) => Number(v)).filter((v) => Number.isFinite(v));
+        if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+            return { width: parts[2], height: parts[3] };
+        }
+    }
+    if (width && height && width > 0 && height > 0) return { width, height };
+    return null;
+}
+
+function overlayHasOccludingImagePlaceholders(svgContent, zones, canvasW, canvasH) {
+    if (!svgContent || !Array.isArray(zones) || zones.length === 0) return false;
+    if (/zoomAndPan\s*=\s*["']magnify["']/i.test(svgContent)) {
+        // Canva-like exports often include local-space placeholders that can
+        // cover image slots if drawn after photos.
+        return true;
+    }
+    const svgSpace = parseSvgCoordinateSpace(svgContent);
+    const scaleX = svgSpace && svgSpace.width ? canvasW / svgSpace.width : 1;
+    const scaleY = svgSpace && svgSpace.height ? canvasH / svgSpace.height : 1;
+    const rectTags = svgContent.match(/<rect\b[^>]*>/gi) || [];
+    if (rectTags.length === 0) return false;
+    const near = (a, b) => Math.abs(a - b) <= 3;
+
+    for (const tag of rectTags) {
+        const fill = (parseStringAttr(tag, 'fill') || '').trim().toLowerCase();
+        const fillOpacityRaw = parseStringAttr(tag, 'fill-opacity');
+        const fillOpacity = fillOpacityRaw != null ? Number(fillOpacityRaw) : 1;
+        if (fill === 'none' || (Number.isFinite(fillOpacity) && fillOpacity <= 0.01)) continue;
+
+        const x = (parseNumericAttr(tag, 'x') ?? 0) * scaleX;
+        const y = (parseNumericAttr(tag, 'y') ?? 0) * scaleY;
+        const width = (parseNumericAttr(tag, 'width') ?? 0) * scaleX;
+        const height = (parseNumericAttr(tag, 'height') ?? 0) * scaleY;
+        if (width <= 1 || height <= 1) continue;
+
+        const overlapsZone = zones.some((zone) =>
+            near(x, Number(zone.x || 0)) &&
+            near(y, Number(zone.y || 0)) &&
+            near(width, Number(zone.width || 0)) &&
+            near(height, Number(zone.height || 0))
+        );
+        if (overlapsZone) return true;
+    }
+    return false;
+}
+
 /**
  * Render overlay SVG to canvas
  */
@@ -213,9 +321,8 @@ async function renderPin(renderData) {
 
     // Debug logging
     console.error(`[DEBUG] Rendering pin with ${template.zones.length} zones`);
-    console.error(`[DEBUG] Zone 0:`, template.zones[0]);
-    console.error(`[DEBUG] Zone 1:`, template.zones[1]);
-    console.error(`[DEBUG] Image URLs:`, content.image1Url, content.image2Url);
+        console.error(`[DEBUG] Zone count:`, (template.zones || []).length);
+        console.error(`[DEBUG] Image URLs count:`, (content.imageUrls || []).length);
 
     try {
         const canvasW = template.width;
@@ -232,27 +339,52 @@ async function renderPin(renderData) {
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvasW, canvasH);
 
-        // 2. Load and draw images
+        // 2. Load images
         console.error(`[DEBUG] Loading images...`);
-        const img1 = await loadImage(content.image1Url);
-        const img2 = await loadImage(content.image2Url);
+        const imageUrls = Array.isArray(content.imageUrls)
+            ? content.imageUrls
+            : [content.image1Url, content.image2Url].filter(Boolean);
+        const loadedImages = await Promise.all(imageUrls.map((url) => loadImage(url)));
+        const availableImages = loadedImages.filter(Boolean);
+        const zones = Array.isArray(template.zones) ? template.zones : [];
 
-        console.error(`[DEBUG] img1 loaded:`, img1 ? `Yes (${img1.width || img1.naturalWidth}x${img1.height || img1.naturalHeight})` : 'No');
-        console.error(`[DEBUG] img2 loaded:`, img2 ? `Yes (${img2.width || img2.naturalWidth}x${img2.height || img2.naturalHeight})` : 'No');
+        console.error(`[DEBUG] Loaded images:`, availableImages.length);
+        const shouldDrawOverlayBeforeImages = Boolean(
+            template.overlaySvg &&
+            template.overlaySvg.trim() !== '<svg></svg>' &&
+            overlayHasOccludingImagePlaceholders(template.overlaySvg, zones, canvasW, canvasH)
+        );
 
-        if (template.zones[0] && img1) {
-            console.error(`[DEBUG] Drawing img1 in zone 0`);
-            const z = template.zones[0];
-            drawCoverCenter(ctx, img1, z.x, z.y, z.width, z.height);
+        // 3. Draw overlay SVG before images when placeholders would cover slots
+        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>' && shouldDrawOverlayBeforeImages) {
+            console.error(`[DEBUG] Drawing overlay SVG`);
+            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
+            if (overlayImg) {
+                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
+            }
         }
 
-        if (template.zones[1] && img2) {
-            console.error(`[DEBUG] Drawing img2 in zone 1`);
-            const z = template.zones[1];
-            drawCoverCenter(ctx, img2, z.x, z.y, z.width, z.height);
+        // 4. Draw images
+        for (let i = 0; i < zones.length; i++) {
+            const z = zones[i];
+            if (!z) continue;
+            if (availableImages.length === 0) break;
+            const img = availableImages[i % availableImages.length];
+            if (img) {
+                drawCoverCenter(ctx, img, z.x, z.y, z.width, z.height);
+            }
         }
 
-        // 3. Draw text zone background
+        // 5. Draw overlay SVG after images for normal templates
+        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>' && !shouldDrawOverlayBeforeImages) {
+            console.error(`[DEBUG] Drawing overlay SVG`);
+            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
+            if (overlayImg) {
+                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
+            }
+        }
+
+        // 6. Draw text zone background
         console.error(`[DEBUG] Drawing text zone background`);
         const textZoneY = template.textZoneY;
         const textZoneH = template.textZoneHeight;
@@ -260,17 +392,8 @@ async function renderPin(renderData) {
         const padR = settings.textZonePadRight || 0;
         const textAreaW = canvasW - padL - padR;
 
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = settings.textZoneBgColor || '#ffffff';
         ctx.fillRect(padL, textZoneY, textAreaW, textZoneH);
-
-        // 4. Draw overlay SVG
-        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>') {
-            console.error(`[DEBUG] Drawing overlay SVG`);
-            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
-            if (overlayImg) {
-                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
-            }
-        }
 
         if (template.textZoneBorderColor) {
             const borderWidth = template.textZoneBorderWidth || 4;
@@ -282,7 +405,10 @@ async function renderPin(renderData) {
             ctx.restore();
         }
 
-        drawStaticText(ctx, template.textElements);
+        // Disabled by default to avoid duplicate text layers versus generated title.
+        if (settings.drawTemplateStaticText) {
+            drawStaticText(ctx, template.textElements);
+        }
 
         // 5. Draw title text
         const title = content.title || '';
@@ -290,6 +416,7 @@ async function renderPin(renderData) {
             console.error(`[DEBUG] Drawing title: "${title}"`);
             let fontFamily = settings.fontFamily || '"Bebas Neue", Impact, sans-serif';
             const textColor = settings.textColor || '#000000';
+            let fontWeight = '900';
 
             // Normalize font family string - handle quoted font names for canvas
             // Canvas expects font names without surrounding quotes, or with proper escaping
@@ -299,20 +426,38 @@ async function renderPin(renderData) {
                 .replace(/\s+/g, ' ')          // Collapse multiple spaces
                 .trim();
 
+            if (settings.customFontFile && registerFont) {
+                try {
+                    const customPath = path.resolve(
+                        path.join(__dirname, '..', '..', 'storage', 'fonts', settings.customFontFile)
+                    );
+                    if (fs.existsSync(customPath)) {
+                        const registeredFamily = `CustomFont_${String(settings.customFontFile).replace(/[^a-zA-Z0-9]/g, '_')}`;
+                        registerFont(customPath, { family: registeredFamily });
+                        fontFamily = registeredFamily;
+                        // Avoid font fallback when the uploaded file only has regular weight.
+                        fontWeight = '';
+                    }
+                } catch (fontErr) {
+                    console.error('[DEBUG] Failed to register custom font:', fontErr);
+                }
+            }
+
             const { lines, fontSize } = fitTitle(
                 ctx,
                 title,
                 canvasW - padL - padR,
                 textZoneH,
-                fontFamily
+                fontFamily,
+                fontWeight,
             );
 
             const lineH = fontSize * 1.0;
             const centerX = padL + (canvasW - padL - padR) / 2;
 
-            ctx.font = `900 ${fontSize}px ${fontFamily}`;
+            ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`.trim();
             ctx.fillStyle = textColor;
-            ctx.textAlign = 'center';
+            ctx.textAlign = settings.textAlign === 'left' ? 'left' : 'center';
             ctx.textBaseline = 'alphabetic';
 
             // Center text vertically using cap height
@@ -323,9 +468,15 @@ async function renderPin(renderData) {
             const visualH = capH + (lines.length - 1) * lineH;
             const firstBase = textZoneY + (textZoneH - visualH) / 2 + capAscent;
 
-            lines.forEach((line, i) => {
-                ctx.fillText(line, centerX, firstBase + i * lineH);
-            });
+            drawTextWithEffect(
+                ctx,
+                lines,
+                centerX,
+                firstBase,
+                lineH,
+                textColor,
+                settings,
+            );
         }
 
         // Save to file

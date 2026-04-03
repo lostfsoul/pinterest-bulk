@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import apiClient, { AIPromptPreset, PlaceholderInfo } from '../services/api';
+import apiClient, { AIPromptPreset, PlaceholderInfo, AIModelInfo } from '../services/api';
 import type { AISettings } from '../services/api';
 import { Button } from '../components/Button';
 import { PlaceholderButtons } from '../components/PlaceholderButtons';
@@ -13,12 +13,6 @@ const TARGET_FIELD_OPTIONS = [
   { value: 'title', label: 'Title' },
   { value: 'description', label: 'Description' },
   { value: 'board', label: 'Board Name' },
-];
-
-const MODEL_OPTIONS = [
-  { value: 'gpt-4o-mini', label: 'GPT-4o Mini (Fast, Cost-effective)' },
-  { value: 'gpt-4o', label: 'GPT-4o (Higher Quality)' },
-  { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (Legacy)' },
 ];
 
 interface PresetFormData {
@@ -48,6 +42,7 @@ export default function AISettings() {
   const [settings, setSettings] = useState<AISettings | null>(null);
   const [placeholderInfo, setPlaceholderInfo] = useState<PlaceholderInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [models, setModels] = useState<AIModelInfo[]>([]);
   const [editingPreset, setEditingPreset] = useState<AIPromptPreset | null>(null);
   const [formData, setFormData] = useState<PresetFormData>(defaultFormData);
   const [saving, setSaving] = useState(false);
@@ -60,14 +55,16 @@ export default function AISettings() {
 
   async function loadData() {
     try {
-      const [presetsRes, settingsRes, placeholdersRes] = await Promise.all([
+      const [presetsRes, settingsRes, placeholdersRes, modelsRes] = await Promise.all([
         apiClient.listAIPresets(),
         apiClient.getAISettings(),
         apiClient.getPlaceholderInfo(),
+        apiClient.listAIModels(),
       ]);
       setPresets(presetsRes.data);
       setSettings(settingsRes.data);
       setPlaceholderInfo(placeholdersRes.data);
+      setModels(modelsRes.data.models);
     } finally {
       setLoading(false);
     }
@@ -391,8 +388,10 @@ export default function AISettings() {
                     onChange={(e) => setFormData(prev => ({ ...prev, model: e.target.value }))}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md"
                   >
-                    {MODEL_OPTIONS.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    {models.map((opt) => (
+                      <option key={opt.id} value={opt.id} disabled={!opt.available}>
+                        {opt.label} ({opt.provider}) {!opt.available ? ' - missing API key' : ''}
+                      </option>
                     ))}
                   </select>
                 </div>

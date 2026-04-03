@@ -6,8 +6,16 @@ interface PinPreviewSettings {
   textZoneHeight: number;
   textZonePadLeft: number;
   textZonePadRight: number;
+  textZoneBgColor: string;
   fontFamily: string;
   textColor: string;
+  textAlign?: 'left' | 'center';
+  textEffect?: 'none' | 'drop' | 'echo' | 'outline';
+  textEffectColor?: string;
+  textEffectOffsetX?: number;
+  textEffectOffsetY?: number;
+  textEffectBlur?: number;
+  customFontFile?: string | null;
 }
 
 interface PinPreviewProps {
@@ -50,11 +58,102 @@ function drawCoverCenter(
 
 function loadImage(url: string) {
   return new Promise<HTMLImageElement | null>((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src = url;
+    const tryLoad = (withCors: boolean) => {
+      const img = new Image();
+      if (withCors) img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        if (withCors) {
+          tryLoad(false);
+          return;
+        }
+        resolve(null);
+      };
+      img.src = url;
+    };
+    tryLoad(true);
+  });
+}
+
+function parseNumericAttr(tag: string, name: string): number | null {
+  const match = tag.match(new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'i'));
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function parseStringAttr(tag: string, name: string): string | null {
+  const match = tag.match(new RegExp(`${name}\\s*=\\s*["']([^"']+)["']`, 'i'));
+  return match ? String(match[1]) : null;
+}
+
+function parseSvgCoordinateSpace(svg: string): { width: number; height: number } | null {
+  const svgOpen = svg.match(/<svg\b[^>]*>/i)?.[0];
+  if (!svgOpen) return null;
+
+  const width = parseNumericAttr(svgOpen, 'width');
+  const height = parseNumericAttr(svgOpen, 'height');
+  const viewBoxRaw = parseStringAttr(svgOpen, 'viewBox');
+  if (viewBoxRaw) {
+    const parts = viewBoxRaw
+      .trim()
+      .split(/[\s,]+/)
+      .map((v) => Number(v))
+      .filter((v) => Number.isFinite(v));
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+      return { width: parts[2], height: parts[3] };
+    }
+  }
+  if (width && height && width > 0 && height > 0) return { width, height };
+  return null;
+}
+
+function overlayHasOccludingImagePlaceholders(
+  svg: string,
+  imageZones: TemplateZone[],
+  canvasWidth: number,
+  canvasHeight: number,
+): boolean {
+  if (!svg || imageZones.length === 0) return false;
+  if (/zoomAndPan\s*=\s*["']magnify["']/i.test(svg)) {
+    return true;
+  }
+  const svgSpace = parseSvgCoordinateSpace(svg);
+  const scaleX = svgSpace?.width ? canvasWidth / svgSpace.width : 1;
+  const scaleY = svgSpace?.height ? canvasHeight / svgSpace.height : 1;
+  const rectTags = svg.match(/<rect\b[^>]*>/gi) || [];
+  if (rectTags.length === 0) return false;
+
+  const near = (a: number, b: number) => Math.abs(a - b) <= 3;
+  for (const tag of rectTags) {
+    const fill = (parseStringAttr(tag, 'fill') || '').trim().toLowerCase();
+    const fillOpacityRaw = parseStringAttr(tag, 'fill-opacity');
+    const fillOpacity = fillOpacityRaw != null ? Number(fillOpacityRaw) : 1;
+    if (fill === 'none' || (Number.isFinite(fillOpacity) && fillOpacity <= 0.01)) continue;
+
+    const x = (parseNumericAttr(tag, 'x') ?? 0) * scaleX;
+    const y = (parseNumericAttr(tag, 'y') ?? 0) * scaleY;
+    const width = (parseNumericAttr(tag, 'width') ?? 0) * scaleX;
+    const height = (parseNumericAttr(tag, 'height') ?? 0) * scaleY;
+    if (width <= 1 || height <= 1) continue;
+
+    const overlapsZone = imageZones.some((zone) =>
+      near(x, zone.x) &&
+      near(y, zone.y) &&
+      near(width, zone.width) &&
+      near(height, zone.height),
+    );
+    if (overlapsZone) return true;
+  }
+  return false;
+}
+
+function sortImageZones(zones: TemplateZone[]): TemplateZone[] {
+  return [...zones].sort((a, b) => {
+    const aIndex = Number((a.props as Record<string, unknown> | null)?.zone_index ?? 9999);
+    const bIndex = Number((b.props as Record<string, unknown> | null)?.zone_index ?? 9999);
+    if (aIndex !== bIndex) return aIndex - bIndex;
+    return a.id - b.id;
   });
 }
 
@@ -165,6 +264,53 @@ function fitTitle(
   return best;
 }
 
+function drawTextWithEffect(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  centerX: number,
+  firstBaseline: number,
+  lineHeight: number,
+  settings: PinPreviewSettings,
+) {
+  const textColor = settings.textColor;
+  const textAlign = settings.textAlign === 'left' ? 'left' : 'center';
+  const effect = settings.textEffect || 'none';
+  const effectColor = settings.textEffectColor || '#000000';
+  const offsetX = Number(settings.textEffectOffsetX || 2);
+  const offsetY = Number(settings.textEffectOffsetY || 2);
+  const blur = Number(settings.textEffectBlur || 0);
+  const textX = textAlign === 'left' ? settings.textZonePadLeft + 15 : centerX;
+
+  if (effect !== 'none') {
+    ctx.save();
+    ctx.fillStyle = effectColor;
+    ctx.strokeStyle = effectColor;
+    ctx.lineJoin = 'round';
+    ctx.shadowBlur = effect === 'drop' ? blur : 0;
+    ctx.shadowColor = effectColor;
+    ctx.textAlign = textAlign;
+    lines.forEach((line, index) => {
+      const y = firstBaseline + index * lineHeight;
+      if (effect === 'drop') {
+        ctx.fillText(line, textX + offsetX, y + offsetY);
+      } else if (effect === 'echo') {
+        ctx.fillText(line, textX + offsetX, y + offsetY);
+        ctx.fillText(line, textX - offsetX, y - offsetY);
+      } else if (effect === 'outline') {
+        ctx.lineWidth = Math.max(1, Math.abs(offsetX) || Math.abs(offsetY) || 1);
+        ctx.strokeText(line, textX, y);
+      }
+    });
+    ctx.restore();
+  }
+
+  ctx.fillStyle = textColor;
+  ctx.textAlign = textAlign;
+  lines.forEach((line, index) => {
+    ctx.fillText(line, textX, firstBaseline + index * lineHeight);
+  });
+}
+
 export function PinPreview({
   template,
   imageUrls = [],
@@ -177,6 +323,7 @@ export function PinPreview({
   const overlayRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [templateSvg, setTemplateSvg] = useState<string | null>(null);
+  const loadedFontFilesRef = useRef<Set<string>>(new Set());
   const dragModeRef = useRef<DragMode>(null);
   const dragStartRef = useRef<{
     clientX: number;
@@ -221,7 +368,7 @@ export function PinPreview({
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, template.width, template.height);
 
-      let imageZones = (template.zones?.filter((zone) => zone.zone_type === 'image') || []).slice(0, 2);
+      let imageZones = sortImageZones(template.zones?.filter((zone) => zone.zone_type === 'image') || []);
       if (imageZones.length === 0) {
         const topHeight = Math.max(0, Math.round(settings.textZoneY));
         const bottomStart = Math.round(settings.textZoneY + settings.textZoneHeight);
@@ -242,22 +389,14 @@ export function PinPreview({
       }
 
       const urlsToRender = imageUrls.length > 0
-        ? imageUrls.slice(0, imageZones.length)
+        ? Array.from({ length: imageZones.length }, (_, index) => imageUrls[index % imageUrls.length])
         : ['https://via.placeholder.com/800x600?text=Sample+Image'];
       const images = await Promise.all(urlsToRender.map(loadImage));
 
-      images.forEach((img, index) => {
-        const zone = imageZones[index];
-        if (img && zone) {
-          drawCoverCenter(ctx, img, zone);
-        }
-      });
-
-      const textAreaWidth = template.width - settings.textZonePadLeft - settings.textZonePadRight;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(settings.textZonePadLeft, settings.textZoneY, textAreaWidth, settings.textZoneHeight);
-
-      if (templateSvg) {
+      const shouldDrawOverlayBeforeImages = Boolean(
+        templateSvg && overlayHasOccludingImagePlaceholders(templateSvg, imageZones, template.width, template.height),
+      );
+      if (templateSvg && shouldDrawOverlayBeforeImages) {
         const blob = new Blob([templateSvg], { type: 'image/svg+xml' });
         const svgUrl = URL.createObjectURL(blob);
         const overlayImg = await loadImage(svgUrl);
@@ -266,6 +405,27 @@ export function PinPreview({
           ctx.drawImage(overlayImg, 0, 0, template.width, template.height);
         }
       }
+
+      images.forEach((img, index) => {
+        const zone = imageZones[index];
+        if (img && zone) {
+          drawCoverCenter(ctx, img, zone);
+        }
+      });
+
+      if (templateSvg && !shouldDrawOverlayBeforeImages) {
+        const blob = new Blob([templateSvg], { type: 'image/svg+xml' });
+        const svgUrl = URL.createObjectURL(blob);
+        const overlayImg = await loadImage(svgUrl);
+        URL.revokeObjectURL(svgUrl);
+        if (overlayImg) {
+          ctx.drawImage(overlayImg, 0, 0, template.width, template.height);
+        }
+      }
+
+      const textAreaWidth = template.width - settings.textZonePadLeft - settings.textZonePadRight;
+      ctx.fillStyle = settings.textZoneBgColor || '#ffffff';
+      ctx.fillRect(settings.textZonePadLeft, settings.textZoneY, textAreaWidth, settings.textZoneHeight);
 
       if (borderColor) {
         const half = borderWidth / 2;
@@ -283,6 +443,22 @@ export function PinPreview({
 
       // Wait for fonts to be loaded before drawing text
       try {
+        if (settings.customFontFile && !loadedFontFilesRef.current.has(settings.customFontFile)) {
+          const family = normalizeFontFamily(settings.fontFamily).split(',')[0].trim();
+          if (family) {
+            try {
+              const face = new FontFace(
+                family,
+                `url(/api/templates/fonts/${encodeURIComponent(settings.customFontFile)})`,
+              );
+              await face.load();
+              document.fonts.add(face);
+              loadedFontFilesRef.current.add(settings.customFontFile);
+            } catch (fontError) {
+              console.warn('Custom font load failed:', settings.customFontFile, fontError);
+            }
+          }
+        }
         await document.fonts.ready;
         // Try to load the specific font if it's a custom font
         const fontToLoad = normalizedFont.split(',')[0].trim();
@@ -305,8 +481,6 @@ export function PinPreview({
       const lineHeight = fontSize;
       const centerX = settings.textZonePadLeft + textAreaWidth / 2;
       ctx.font = `900 ${fontSize}px ${normalizedFont}`;
-      ctx.fillStyle = settings.textColor;
-      ctx.textAlign = 'center';
       ctx.textBaseline = 'alphabetic';
       const metrics = ctx.measureText('A');
       const capAscent = metrics.actualBoundingBoxAscent || fontSize * 0.72;
@@ -314,15 +488,13 @@ export function PinPreview({
       const visualHeight = capAscent + capDescent + (lines.length - 1) * lineHeight;
       const firstBaseline = settings.textZoneY + (settings.textZoneHeight - visualHeight) / 2 + capAscent;
 
-      lines.forEach((line, index) => {
-        ctx.fillText(line, centerX, firstBaseline + index * lineHeight);
-      });
+      drawTextWithEffect(ctx, lines, centerX, firstBaseline, lineHeight, settings);
     };
 
     render().catch((error) => {
       console.error('Failed to render preview:', error);
     });
-  }, [borderColor, borderWidth, imageUrls, loading, settings.fontFamily, settings.textColor, settings.textZoneHeight, settings.textZonePadLeft, settings.textZonePadRight, settings.textZoneY, template, templateSvg, title]);
+  }, [borderColor, borderWidth, imageUrls, loading, settings.customFontFile, settings.fontFamily, settings.textAlign, settings.textColor, settings.textEffect, settings.textEffectColor, settings.textEffectOffsetX, settings.textEffectOffsetY, settings.textEffectBlur, settings.textZoneBgColor, settings.textZoneHeight, settings.textZonePadLeft, settings.textZonePadRight, settings.textZoneY, template, templateSvg, title]);
 
   useEffect(() => {
     if (!onZoneChange) return undefined;
@@ -337,7 +509,11 @@ export function PinPreview({
       const start = dragStartRef.current;
 
       if (dragModeRef.current === 'move') {
+        const zoneWidth = template.width - start.padLeft - start.padRight;
+        const nextLeft = Math.max(0, Math.min(template.width - zoneWidth, Math.round(start.padLeft + dx)));
         const nextY = Math.max(0, Math.min(template.height - start.zoneHeight, Math.round(start.zoneY + dy)));
+        onZoneChange('textZonePadLeft', nextLeft);
+        onZoneChange('textZonePadRight', Math.max(0, template.width - zoneWidth - nextLeft));
         onZoneChange('textZoneY', nextY);
       } else if (dragModeRef.current === 'top') {
         const nextY = Math.max(0, Math.min(template.height - MIN_TEXT_ZONE_HEIGHT, Math.round(start.zoneY + dy)));

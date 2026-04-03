@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import apiClient, { Website, Page } from '../services/api';
+import apiClient, { Website, Page, SitemapGroup } from '../services/api';
 import { Button } from '../components/Button';
 
 export default function WebsiteDetail() {
@@ -11,11 +11,14 @@ export default function WebsiteDetail() {
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ total_urls: number; new_pages: number; updated_pages: number; errors: string[] } | null>(null);
+  const [sitemapGroups, setSitemapGroups] = useState<SitemapGroup[]>([]);
+  const [selectedSitemaps, setSelectedSitemaps] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (id) {
       loadWebsite();
       loadPages();
+      loadSitemapGroups();
     }
   }, [id]);
 
@@ -26,6 +29,22 @@ export default function WebsiteDetail() {
       setWebsite(response.data);
     } catch (error) {
       console.error('Failed to load website:', error);
+    }
+  };
+
+  const loadSitemapGroups = async () => {
+    if (!id) return;
+    try {
+      const response = await apiClient.listSitemapGroups(Number(id));
+      setSitemapGroups(response.data.groups);
+      const defaults = response.data.groups
+        .filter((group) => group.is_default)
+        .map((group) => group.sitemap_url);
+      setSelectedSitemaps(new Set(defaults));
+    } catch (error) {
+      console.error('Failed to load sitemap groups:', error);
+      setSitemapGroups([]);
+      setSelectedSitemaps(new Set());
     }
   };
 
@@ -51,7 +70,10 @@ export default function WebsiteDetail() {
     setImportResult(null);
 
     try {
-      const response = await apiClient.importSitemap(Number(id));
+      const selected = Array.from(selectedSitemaps);
+      const response = selected.length > 0
+        ? await apiClient.importSitemapWithGroups(Number(id), selected)
+        : await apiClient.importSitemap(Number(id));
       setImportResult(response.data);
       loadPages();
       loadWebsite(); // Refresh counts
@@ -61,6 +83,15 @@ export default function WebsiteDetail() {
     } finally {
       setImporting(false);
     }
+  };
+
+  const toggleGroup = (groupUrl: string) => {
+    setSelectedSitemaps((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupUrl)) next.delete(groupUrl);
+      else next.add(groupUrl);
+      return next;
+    });
   };
 
   const togglePageEnabled = async (pageId: number, currentState: boolean) => {
@@ -114,6 +145,33 @@ export default function WebsiteDetail() {
               </ul>
             </details>
           )}
+        </div>
+      )}
+
+      {sitemapGroups.length > 0 && (
+        <div className="bg-white border-2 border-black shadow-brutal p-4 sm:p-6 space-y-3">
+          <h2 className="text-sm font-black uppercase">Sitemap Groups</h2>
+          <p className="text-xs text-gray-600">Post sitemaps are selected by default. Adjust before importing.</p>
+          <div className="space-y-2 max-h-56 overflow-y-auto">
+            {sitemapGroups.map((group) => (
+              <label key={group.sitemap_url} className="flex items-center gap-3 border border-black px-3 py-2">
+                <input
+                  type="checkbox"
+                  checked={selectedSitemaps.has(group.sitemap_url)}
+                  onChange={() => toggleGroup(group.sitemap_url)}
+                  className="h-4 w-4"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-bold truncate">{group.label}</p>
+                  <p className="text-xs text-gray-500 truncate">{group.sitemap_url}</p>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 border border-black uppercase">{group.bucket}</span>
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-gray-600">
+            Selected: {selectedSitemaps.size} / {sitemapGroups.length}
+          </p>
         </div>
       )}
 

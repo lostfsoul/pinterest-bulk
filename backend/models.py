@@ -17,6 +17,7 @@ class Website(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str] = mapped_column(String(1024), nullable=False)
     sitemap_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    generation_settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
@@ -26,6 +27,9 @@ class Website(Base):
     )
     import_logs: Mapped[list["ImportLog"]] = relationship(
         "ImportLog", back_populates="website", cascade="all, delete-orphan"
+    )
+    boards: Mapped[list["Board"]] = relationship(
+        "Board", back_populates="website", cascade="all, delete-orphan"
     )
 
 
@@ -70,6 +74,7 @@ class PageKeyword(Base):
         Integer, ForeignKey("pages.id"), nullable=False, index=True
     )
     keyword: Mapped[str] = mapped_column(String(255), nullable=False)
+    keyword_role: Mapped[str] = mapped_column(String(20), default="seo", nullable=False)
     period_type: Mapped[str] = mapped_column(String(20), default="always", nullable=False)
     period_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
@@ -95,6 +100,19 @@ class Template(Base):
     )
     pin_drafts: Mapped[list["PinDraft"]] = relationship(
         "PinDraft", back_populates="template"
+    )
+
+
+class CustomFont(Base):
+    """Uploaded custom font metadata."""
+    __tablename__ = "custom_fonts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False, unique=True, index=True)
+    original_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    family: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
     )
 
 
@@ -180,8 +198,16 @@ class PinDraft(Base):
     text_zone_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
     text_zone_pad_left: Mapped[int | None] = mapped_column(Integer, nullable=True)
     text_zone_pad_right: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text_align: Mapped[str | None] = mapped_column(String(20), nullable=True)
     font_family: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    custom_font_file: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    text_zone_bg_color: Mapped[str | None] = mapped_column(String(32), nullable=True)
     text_color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    text_effect: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    text_effect_color: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    text_effect_offset_x: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text_effect_offset_y: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text_effect_blur: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(
         String(50), default="draft", nullable=False
     )  # draft, ready, exported, skipped
@@ -207,6 +233,9 @@ class ScheduleSettings(Base):
     end_hour: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     min_days_reuse: Mapped[int] = mapped_column(Integer, default=31, nullable=False)
     random_minutes: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    warmup_month: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    floating_days: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    max_floating_minutes: Mapped[int] = mapped_column(Integer, default=45, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
@@ -244,18 +273,29 @@ class ExportLog(Base):
     )
 
 
-class ActivityLog(Base):
-    """General activity log for traceability."""
-    __tablename__ = "activity_logs"
+class GenerationJob(Base):
+    """Background generation job with progress state."""
+    __tablename__ = "generation_jobs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    action: Mapped[str] = mapped_column(String(100), nullable=False)
-    entity_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
+    website_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("websites.id"), nullable=True, index=True)
+    template_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("templates.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(50), default="queued", nullable=False)
+    phase: Mapped[str] = mapped_column(String(50), default="queued", nullable=False)
+    message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    total_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    scraped_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_pages: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_pins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rendered_pins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AIPromptPreset(Base):
@@ -295,3 +335,23 @@ class AISettings(Base):
     )
     default_language: Mapped[str] = mapped_column(String(50), default="English", nullable=False)
     use_ai_by_default: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Board(Base):
+    """Board names used for CSV export assignment."""
+    __tablename__ = "boards"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    website_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("websites.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), default="manual", nullable=False)
+    keywords: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_page_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    website: Mapped["Website"] = relationship("Website", back_populates="boards")

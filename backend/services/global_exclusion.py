@@ -24,9 +24,20 @@ def matches_url_pattern(image_url: str, url_pattern: str | None) -> bool:
     if not url_pattern:
         return False
 
+    normalized_pattern = url_pattern.strip()
+    if not normalized_pattern:
+        return False
+
+    image_url_lower = image_url.lower()
+    pattern_lower = normalized_pattern.lower()
+
+    # If no wildcard is provided, treat pattern as "contains" to make rules easy to use.
+    if '*' not in normalized_pattern:
+        return pattern_lower in image_url_lower
+
     # Convert wildcard pattern to regex
     # Escape special regex characters except *
-    escaped = re.escape(url_pattern)
+    escaped = re.escape(normalized_pattern)
     regex_pattern = escaped.replace(r'\*', '.*')
     regex_pattern = f'^{regex_pattern}$'
 
@@ -44,14 +55,22 @@ def matches_name_pattern(image_url: str, name_pattern: str | None) -> bool:
     if not name_pattern:
         return False
 
+    normalized_pattern = name_pattern.strip()
+    if not normalized_pattern:
+        return False
+
     # Extract filename from URL
     url_lower = image_url.lower()
-    name_lower = name_pattern.lower()
+    name_lower = normalized_pattern.lower()
 
     # Get the filename part of the URL
     filename = url_lower.split('/')[-1]
     if '?' in filename:
         filename = filename.split('?')[0]
+
+    # If no wildcard is provided, treat pattern as "contains".
+    if '*' not in normalized_pattern:
+        return name_lower in filename
 
     # Convert wildcard pattern to regex
     escaped = re.escape(name_lower)
@@ -140,6 +159,42 @@ def apply_exclusion_to_images(
         "rule_id": rule_id,
         "matched": matched_count,
         "applied": not dry_run
+    }
+
+
+def recompute_global_exclusions(db: Session) -> dict:
+    """
+    Recompute global exclusion flags for all images based on currently active rules.
+    Useful after deleting or editing rules so previously matched images can be restored.
+    """
+    from models import PageImage
+
+    rules = db.query(GlobalExcludedImage).all()
+    images = db.query(PageImage).all()
+    matched_count = 0
+    restored_count = 0
+
+    for image in images:
+        match = check_global_exclusion(image.url, rules)
+        if match.matched:
+            matched_count += 1
+            image.excluded_by_global_rule = True
+            image.is_excluded = True
+            continue
+
+        # Image no longer matches any global rule
+        if image.excluded_by_global_rule:
+            image.excluded_by_global_rule = False
+            # Restore to included when it was excluded due to global rule.
+            # Manual per-image exclusions can be re-applied by user if needed.
+            image.is_excluded = False
+            restored_count += 1
+
+    db.commit()
+    return {
+        "rules": len(rules),
+        "matched": matched_count,
+        "restored": restored_count,
     }
 
 

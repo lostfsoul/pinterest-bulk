@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 import httpx
 
 from database import get_db
-from models import Page, PageImage, Website, GlobalExcludedImage
+from models import Page, PageImage, PageKeyword, Website, GlobalExcludedImage
 from schemas import (
     PageImageResponse,
     PageWithImages,
@@ -28,7 +28,7 @@ from schemas import (
 )
 from services.image_metadata import fetch_image_metadata, is_hq_image
 from services.image_classifier import classify_image, should_auto_exclude, ImageCategory
-from services.global_exclusion import check_global_exclusion, apply_exclusion_to_images
+from services.global_exclusion import check_global_exclusion, apply_exclusion_to_images, recompute_global_exclusions
 
 router = APIRouter()
 
@@ -222,6 +222,70 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
     return unique_results[:20]  # Limit to 20 images per page
 
 
+async def scrape_page_into_db(
+    page: Page,
+    db: Session,
+    global_rules: list[GlobalExcludedImage] | None = None,
+) -> list[PageImage]:
+    """Scrape a page and persist its images with classification metadata."""
+    db.query(PageImage).filter(PageImage.page_id == page.id).delete()
+
+    rules = global_rules if global_rules is not None else db.query(GlobalExcludedImage).all()
+    scrape_results = await scrape_page_images(page.url)
+
+    images: list[PageImage] = []
+    for result in scrape_results:
+        metadata = await fetch_image_metadata(result.url)
+
+        if metadata.width is None and result.html_width:
+            metadata.width = result.html_width
+        if metadata.height is None and result.html_height:
+            metadata.height = result.html_height
+
+        classification = classify_image(
+            result.url,
+            metadata,
+            is_wp_content_image=result.is_wp_content_image,
+        )
+
+        exclusion_match = check_global_exclusion(result.url, rules)
+        excluded_by_global = exclusion_match.matched
+
+        should_exclude, _ = should_auto_exclude(
+            result.url,
+            classification.category,
+            metadata,
+            excluded_by_global,
+        )
+
+        hq = is_hq_image(metadata, result.url)
+
+        img = PageImage(
+            page_id=page.id,
+            url=result.url,
+            is_excluded=should_exclude,
+            width=metadata.width,
+            height=metadata.height,
+            file_size=metadata.file_size,
+            mime_type=metadata.mime_type,
+            format=metadata.format,
+            is_article_image=classification.is_article_image,
+            is_hq=hq,
+            category=classification.category,
+            excluded_by_global_rule=excluded_by_global,
+        )
+        db.add(img)
+        images.append(img)
+
+    page.scraped_at = datetime.utcnow()
+    db.commit()
+
+    for img in images:
+        db.refresh(img)
+
+    return images
+
+
 def derive_section(page_url: str) -> str:
     """Derive a coarse section/category from the URL path."""
     path_parts = [part for part in urlparse(page_url).path.split("/") if part]
@@ -262,75 +326,8 @@ async def scrape_page(
     if not page:
         raise HTTPException(status_code=404, detail="Page not found")
 
-    # Clear existing images
-    db.query(PageImage).filter(PageImage.page_id == page_id).delete()
-
-    # Get global exclusion rules
     global_rules = db.query(GlobalExcludedImage).all()
-
-    # Scrape new images
-    scrape_results = await scrape_page_images(page.url)
-
-    # Create database records with metadata and classification
-    images = []
-    for result in scrape_results:
-        # Fetch metadata from server
-        metadata = await fetch_image_metadata(result.url)
-
-        # Use HTML dimensions if server metadata doesn't have them
-        if metadata.width is None and result.html_width:
-            metadata.width = result.html_width
-        if metadata.height is None and result.html_height:
-            metadata.height = result.html_height
-
-        # Classify image
-        classification = classify_image(
-            result.url,
-            metadata,
-            is_wp_content_image=result.is_wp_content_image
-        )
-
-        # Check global exclusions
-        exclusion_match = check_global_exclusion(result.url, global_rules)
-        excluded_by_global = exclusion_match.matched
-
-        # Determine if should auto-exclude
-        should_exclude, _ = should_auto_exclude(
-            result.url,
-            classification.category,
-            metadata,
-            excluded_by_global
-        )
-
-        # Determine HQ status
-        hq = is_hq_image(metadata, result.url)
-
-        img = PageImage(
-            page_id=page_id,
-            url=result.url,
-            is_excluded=should_exclude,
-            width=metadata.width,
-            height=metadata.height,
-            file_size=metadata.file_size,
-            mime_type=metadata.mime_type,
-            format=metadata.format,
-            is_article_image=classification.is_article_image,
-            is_hq=hq,
-            category=classification.category,
-            excluded_by_global_rule=excluded_by_global,
-        )
-        db.add(img)
-        images.append(img)
-
-    # Update page scraped_at timestamp
-    page.scraped_at = datetime.utcnow()
-
-    db.commit()
-
-    for img in images:
-        db.refresh(img)
-
-    return images
+    return await scrape_page_into_db(page, db, global_rules)
 
 
 @router.get("/pages", response_model=List[ImagePageSummary])
@@ -343,6 +340,25 @@ def list_image_pages(
     db: Session = Depends(get_db),
 ):
     """List all pages with image scrape inventory metadata."""
+    image_stats = (
+        db.query(
+            PageImage.page_id.label("page_id"),
+            func.count(PageImage.id).label("images_total"),
+            func.sum(case((PageImage.is_excluded == False, 1), else_=0)).label("images_available"),
+            func.sum(case((PageImage.is_excluded == True, 1), else_=0)).label("images_excluded"),
+        )
+        .group_by(PageImage.page_id)
+        .subquery()
+    )
+    keyword_stats = (
+        db.query(
+            PageKeyword.page_id.label("page_id"),
+            func.count(PageKeyword.id).label("keyword_count"),
+        )
+        .group_by(PageKeyword.page_id)
+        .subquery()
+    )
+
     query = (
         db.query(
             Page.id,
@@ -357,13 +373,14 @@ def list_image_pages(
             Page.is_enabled,
             Page.scraped_at,
             Page.created_at,
-            func.count(PageImage.id).label("images_total"),
-            func.sum(case((PageImage.is_excluded == False, 1), else_=0)).label("images_available"),
-            func.sum(case((PageImage.is_excluded == True, 1), else_=0)).label("images_excluded"),
+            image_stats.c.images_total,
+            image_stats.c.images_available,
+            image_stats.c.images_excluded,
+            keyword_stats.c.keyword_count,
         )
         .join(Website, Website.id == Page.website_id)
-        .outerjoin(PageImage, PageImage.page_id == Page.id)
-        .group_by(Page.id, Website.name)
+        .outerjoin(image_stats, image_stats.c.page_id == Page.id)
+        .outerjoin(keyword_stats, keyword_stats.c.page_id == Page.id)
         .order_by(Website.name.asc(), Page.created_at.desc())
     )
 
@@ -409,6 +426,8 @@ def list_image_pages(
                 images_total=row.images_total or 0,
                 images_available=row.images_available or 0,
                 images_excluded=row.images_excluded or 0,
+                keyword_count=row.keyword_count or 0,
+                has_keywords=bool(row.keyword_count or 0),
             )
         )
 
@@ -450,58 +469,7 @@ async def scrape_pages_batch(
     scraped = 0
     for page in pages:
         try:
-            db.query(PageImage).filter(PageImage.page_id == page.id).delete()
-            scrape_results = await scrape_page_images(page.url)
-
-            for result in scrape_results:
-                # Fetch metadata
-                metadata = await fetch_image_metadata(result.url)
-
-                # Use HTML dimensions if server metadata doesn't have them
-                if metadata.width is None and result.html_width:
-                    metadata.width = result.html_width
-                if metadata.height is None and result.html_height:
-                    metadata.height = result.html_height
-
-                # Classify image
-                classification = classify_image(
-                    result.url,
-                    metadata,
-                    is_wp_content_image=result.is_wp_content_image
-                )
-
-                # Check global exclusions
-                exclusion_match = check_global_exclusion(result.url, global_rules)
-                excluded_by_global = exclusion_match.matched
-
-                # Determine if should auto-exclude
-                should_exclude, _ = should_auto_exclude(
-                    result.url,
-                    classification.category,
-                    metadata,
-                    excluded_by_global
-                )
-
-                # Determine HQ status
-                hq = is_hq_image(metadata, result.url)
-
-                db.add(PageImage(
-                    page_id=page.id,
-                    url=result.url,
-                    is_excluded=should_exclude,
-                    width=metadata.width,
-                    height=metadata.height,
-                    file_size=metadata.file_size,
-                    mime_type=metadata.mime_type,
-                    format=metadata.format,
-                    is_article_image=classification.is_article_image,
-                    is_hq=hq,
-                    category=classification.category,
-                    excluded_by_global_rule=excluded_by_global,
-                ))
-
-            page.scraped_at = datetime.utcnow()
-            db.commit()
+            await scrape_page_into_db(page, db, global_rules)
             scraped += 1
         except Exception as error:
             db.rollback()
@@ -628,6 +596,7 @@ def delete_global_exclusion(rule_id: int, db: Session = Depends(get_db)):
 
     db.delete(rule)
     db.commit()
+    recompute_global_exclusions(db)
     return {"message": "Rule deleted successfully"}
 
 

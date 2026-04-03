@@ -20,6 +20,7 @@ class WebsiteCreate(BaseModel):
 class WebsiteUpdate(BaseModel):
     """Schema for updating a website."""
     name: str | None = None
+    url: str | None = None
     sitemap_url: str | None = None
 
 
@@ -29,6 +30,7 @@ class WebsiteResponse(BaseModel):
     name: str
     url: str
     sitemap_url: str | None
+    generation_settings: dict[str, Any] | None = None
     created_at: datetime
 
     class Config:
@@ -97,6 +99,7 @@ class KeywordStatusResponse(BaseModel):
     total_keywords: int
     coverage_percent: float
     by_period_type: dict[str, int]
+    by_role: dict[str, int] | None = None
 
 
 class KeywordEntryResponse(BaseModel):
@@ -108,6 +111,7 @@ class KeywordEntryResponse(BaseModel):
     page_title: str | None
     page_url: str
     keyword: str
+    keyword_role: Literal["selection", "seo"]
     period_type: Literal["always", "month", "season"]
     period_value: str | None
 
@@ -115,6 +119,7 @@ class KeywordEntryResponse(BaseModel):
 class KeywordEntryUpdate(BaseModel):
     """Update keyword entry."""
     keyword: str
+    keyword_role: Literal["selection", "seo"] = "seo"
     period_type: Literal["always", "month", "season"] = "always"
     period_value: str | None = None
 
@@ -207,6 +212,8 @@ class ImagePageSummary(BaseModel):
     images_total: int
     images_available: int
     images_excluded: int
+    keyword_count: int
+    has_keywords: bool
 
 
 class ImageBatchScrapeRequest(BaseModel):
@@ -268,8 +275,23 @@ class PinRenderSettings(BaseModel):
     text_zone_height: int | None = None
     text_zone_pad_left: int | None = None
     text_zone_pad_right: int | None = None
+    text_align: Literal["left", "center"] | None = None
+    palette_mode: Literal["auto", "brand", "manual"] | None = None
+    text_zone_bg_color: str | None = None
+    brand_palette_background_color: str | None = None
+    brand_palette_text_color: str | None = None
+    brand_palette_effect_color: str | None = None
+    manual_palette_background_color: str | None = None
+    manual_palette_text_color: str | None = None
+    manual_palette_effect_color: str | None = None
     font_family: str | None = None
     text_color: str | None = None
+    text_effect: Literal["none", "drop", "echo", "outline"] | None = None
+    text_effect_color: str | None = None
+    text_effect_offset_x: int | None = None
+    text_effect_offset_y: int | None = None
+    text_effect_blur: int | None = None
+    custom_font_file: str | None = None
 
 
 class PinDraftResponse(BaseModel):
@@ -289,8 +311,16 @@ class PinDraftResponse(BaseModel):
     text_zone_height: int | None
     text_zone_pad_left: int | None
     text_zone_pad_right: int | None
+    text_align: str | None
     font_family: str | None
+    custom_font_file: str | None = None
+    text_zone_bg_color: str | None
     text_color: str | None
+    text_effect: str | None
+    text_effect_color: str | None
+    text_effect_offset_x: int | None
+    text_effect_offset_y: int | None
+    text_effect_blur: int | None
     status: str
     is_selected: bool
     created_at: datetime
@@ -310,10 +340,41 @@ class PinDraftUpdate(BaseModel):
     text_zone_height: int | None = None
     text_zone_pad_left: int | None = None
     text_zone_pad_right: int | None = None
+    text_align: Literal["left", "center"] | None = None
     font_family: str | None = None
+    custom_font_file: str | None = None
+    text_zone_bg_color: str | None = None
     text_color: str | None = None
+    text_effect: Literal["none", "drop", "echo", "outline"] | None = None
+    text_effect_color: str | None = None
+    text_effect_offset_x: int | None = None
+    text_effect_offset_y: int | None = None
+    text_effect_blur: int | None = None
     status: str | None = None
     is_selected: bool | None = None
+
+
+class GenerationJobResponse(BaseModel):
+    """Background generation job status."""
+    id: int
+    website_id: int | None
+    template_id: int | None
+    status: str
+    phase: str
+    message: str | None
+    error_detail: str | None
+    total_pages: int
+    processed_pages: int
+    scraped_pages: int
+    failed_pages: int
+    total_pins: int
+    rendered_pins: int
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+    class Config:
+        from_attributes = True
 
 
 class PinGenerateRequest(BaseModel):
@@ -323,6 +384,34 @@ class PinGenerateRequest(BaseModel):
     board_name: str = "General"
     render_settings: PinRenderSettings | None = None
     use_ai_titles: bool = True
+    generate_descriptions: bool = True
+    tone: str = "seo-friendly"
+    keyword_mode: Literal["auto", "manual"] = "auto"
+    manual_keywords: str | None = None
+    cta_style: Literal["soft", "strong", "none"] = "soft"
+    title_max: int = Field(default=100, ge=20, le=200)
+    description_max: int = Field(default=500, ge=60, le=1000)
+    website_id: int | None = None
+    language: str | None = None
+    mode: Literal["conservative", "matrix"] = "conservative"
+    variation_options: dict[str, int | bool] | None = None
+
+
+class GenerationPreviewRequest(BaseModel):
+    """Preview generation result without creating drafts."""
+    template_id: int
+    page_ids: list[int] | None = None
+    website_id: int | None = None
+    mode: Literal["conservative", "matrix"] = "conservative"
+    variation_options: dict[str, int | bool] | None = None
+
+
+class GenerationPreviewResponse(BaseModel):
+    """Projected output for generation preview."""
+    pages_count: int
+    estimated_pins: int
+    mode: str
+    sample: list[dict[str, Any]]
 
 
 # =============================================================================
@@ -337,6 +426,9 @@ class ScheduleSettingsResponse(BaseModel):
     end_hour: int
     min_days_reuse: int
     random_minutes: bool
+    warmup_month: bool
+    floating_days: bool
+    max_floating_minutes: int
     updated_at: datetime
 
     class Config:
@@ -350,16 +442,14 @@ class ScheduleSettingsUpdate(BaseModel):
     end_hour: int = Field(ge=0, le=23)
     min_days_reuse: int = Field(ge=31, le=365)
     random_minutes: bool
+    warmup_month: bool = False
+    floating_days: bool = True
+    max_floating_minutes: int = Field(default=45, ge=0, le=240)
 
 
 # =============================================================================
 # Sitemap Import Schemas
 # =============================================================================
-
-class SitemapImportRequest(BaseModel):
-    """Request for sitemap import."""
-    sitemap_url: str
-
 
 class SitemapImportResponse(BaseModel):
     """Response from sitemap import."""
@@ -367,6 +457,83 @@ class SitemapImportResponse(BaseModel):
     new_pages: int
     updated_pages: int
     errors: list[str]
+
+
+class SitemapGroupResponse(BaseModel):
+    """Single sitemap group entry discovered from sitemap index."""
+    sitemap_url: str
+    label: str
+    bucket: str
+    is_default: bool
+
+
+class SitemapGroupsResponse(BaseModel):
+    """Sitemap groups discovered for a website."""
+    sitemap_url: str
+    groups: list[SitemapGroupResponse]
+
+
+class SitemapImportRequest(BaseModel):
+    """Optional selected sitemap groups for import."""
+    selected_sitemaps: list[str] | None = None
+
+
+class WebsiteGenerationSettingsResponse(BaseModel):
+    """Persisted generation defaults per website."""
+    website_id: int
+    settings: dict[str, Any]
+
+
+class WebsiteGenerationSettingsUpdate(BaseModel):
+    """Update generation defaults per website."""
+    settings: dict[str, Any]
+
+
+class BoardResponse(BaseModel):
+    """Board entry for generation/export."""
+    id: int
+    website_id: int
+    name: str
+    source_type: str
+    keywords: str | None
+    source_page_ids: list[int] | None = None
+    priority: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BoardCreate(BaseModel):
+    """Create board entry."""
+    website_id: int
+    name: str = Field(..., min_length=1, max_length=255)
+    source_type: Literal["manual", "ai"] = "manual"
+    keywords: str | None = None
+    source_page_ids: list[int] | None = None
+    priority: int = 0
+
+
+class BoardUpdate(BaseModel):
+    """Update board entry."""
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    keywords: str | None = None
+    source_page_ids: list[int] | None = None
+    priority: int | None = None
+
+
+class BoardSuggestRequest(BaseModel):
+    """Request AI-like board suggestions."""
+    website_id: int
+    count: int = Field(default=5, ge=1, le=20)
+    page_ids: list[int] | None = None
+
+
+class BoardSuggestResponse(BaseModel):
+    """Suggested board names."""
+    website_id: int
+    page_ids_used: list[int]
+    suggestions: list[str]
 
 
 # =============================================================================
@@ -387,21 +554,8 @@ class ExportResponse(BaseModel):
 
 
 # =============================================================================
-# Analytics/Activity Schemas
+# Analytics Schemas
 # =============================================================================
-
-class ActivityLogResponse(BaseModel):
-    """Schema for activity log response."""
-    id: int
-    action: str
-    entity_type: str | None
-    entity_id: int | None
-    details: dict | None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 class ImportLogResponse(BaseModel):
     """Schema for import log response."""

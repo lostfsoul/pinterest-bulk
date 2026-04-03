@@ -6,6 +6,7 @@ Uses Node.js with canvas package for server-side rendering.
 import subprocess
 import json
 import asyncio
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import tempfile
@@ -67,6 +68,18 @@ def normalize_image_bytes(image_bytes: bytes, source_url: str, content_type: str
     return image_bytes, content_type
 
 
+def sort_page_images(images: list["PageImage"]) -> list["PageImage"]:
+    """Match renderer image ordering with preview/generation ranking."""
+    return sorted(
+        images,
+        key=lambda img: (
+            0 if img.category == "featured" else 1 if img.category == "article" else 2,
+            -((img.width or 0) * (img.height or 0)),
+            img.id or 0,
+        ),
+    )
+
+
 async def render_pin_to_file(
     page: Page,
     template: Template,
@@ -95,29 +108,44 @@ async def render_pin_to_file(
     import base64
     from io import BytesIO
 
+    # Prefer persisted template zones from DB (same source used by preview UI),
+    # then fall back to parser zones.
+    db_image_zones = [
+        {
+            "x": int(zone.x),
+            "y": int(zone.y),
+            "width": int(zone.width),
+            "height": int(zone.height),
+        }
+        for zone in sorted(
+            [z for z in (template.zones or []) if z.zone_type == "image"],
+            key=lambda z: (int((z.props or {}).get("zone_index", 9999)), z.id or 0),
+        )
+    ]
+    zones = db_image_zones if db_image_zones else list(template_data.get("zones") or [])
+    image_slot_count = max(1, len(zones))
+
     # Get page images
     db = SessionLocal()
     try:
         if selected_image_url:
             # Use the selected image as the primary image
             image_urls = [selected_image_url]
-            # Try to get a second image for variety (different from selected)
             additional_images = (
                 db.query(PageImage)
                 .filter(PageImage.page_id == page.id, PageImage.is_excluded == False, PageImage.url != selected_image_url)
-                .limit(1)
                 .all()
             )
+            additional_images = sort_page_images(additional_images)[: max(0, image_slot_count - 1)]
             image_urls.extend([img.url for img in additional_images])
         else:
-            # No specific image selected, use first 2 images from page
+            # No specific image selected, use as many images as template slots
             images = (
                 db.query(PageImage)
                 .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
-                .limit(2)
                 .all()
             )
-            image_urls = [img.url for img in images]
+            image_urls = [img.url for img in sort_page_images(images)[:image_slot_count]]
     finally:
         db.close()
 
@@ -125,7 +153,7 @@ async def render_pin_to_file(
     # Normalize to PNG first because node-canvas is less reliable with formats
     # like WebP/AVIF that browsers preview correctly.
     image_data_urls = []
-    for url in image_urls[:2]:  # Max 2 images
+    for url in image_urls[:image_slot_count]:
         if not url:
             continue
         try:
@@ -170,9 +198,15 @@ async def render_pin_to_file(
         except Exception as e:
             logger.error(f"Error downloading image {url}: {e}")
 
-    # Fill in missing images with empty strings
-    while len(image_data_urls) < 2:
-        image_data_urls.append('')
+    # Fill missing slots by duplicating available images (round-robin).
+    if image_data_urls:
+        idx = 0
+        while len(image_data_urls) < image_slot_count:
+            image_data_urls.append(image_data_urls[idx % len(image_data_urls)])
+            idx += 1
+    else:
+        while len(image_data_urls) < image_slot_count:
+            image_data_urls.append('')
 
     # Default settings
     if settings is None:
@@ -181,8 +215,16 @@ async def render_pin_to_file(
             'textColor': '#000000',
             'textZonePadLeft': 0,
             'textZonePadRight': 0,
+            'textAlign': 'left',
+            'textZoneBgColor': '#ffffff',
             'text_zone_y': template_data.get('text_zone_y', 0),
             'text_zone_height': template_data.get('text_zone_height', 100),
+            'textEffect': 'none',
+            'textEffectColor': '#000000',
+            'textEffectOffsetX': 2,
+            'textEffectOffsetY': 2,
+            'textEffectBlur': 0,
+            'customFontFile': None,
         }
     else:
         settings = {
@@ -190,12 +232,19 @@ async def render_pin_to_file(
             'textColor': settings.get('text_color', settings.get('textColor', '#000000')),
             'textZonePadLeft': settings.get('text_zone_pad_left', settings.get('textZonePadLeft', 0)),
             'textZonePadRight': settings.get('text_zone_pad_right', settings.get('textZonePadRight', 0)),
+            'textAlign': settings.get('text_align', settings.get('textAlign', 'left')),
+            'textZoneBgColor': settings.get('text_zone_bg_color', settings.get('textZoneBgColor', '#ffffff')),
             'text_zone_y': settings.get('text_zone_y', template_data.get('text_zone_y', 0)),
             'text_zone_height': settings.get('text_zone_height', template_data.get('text_zone_height', 100)),
+            'textEffect': settings.get('text_effect', settings.get('textEffect', 'none')),
+            'textEffectColor': settings.get('text_effect_color', settings.get('textEffectColor', '#000000')),
+            'textEffectOffsetX': settings.get('text_effect_offset_x', settings.get('textEffectOffsetX', 2)),
+            'textEffectOffsetY': settings.get('text_effect_offset_y', settings.get('textEffectOffsetY', 2)),
+            'textEffectBlur': settings.get('text_effect_blur', settings.get('textEffectBlur', 0)),
+            'customFontFile': settings.get('custom_font_file', settings.get('customFontFile')),
         }
 
     # Prepare render data
-    zones = template_data.get('zones', [])
     if not zones:
         text_zone_y = settings.get('text_zone_y', template_data.get('text_zone_y', 0))
         text_zone_height = settings.get('text_zone_height', template_data.get('text_zone_height', 0))
@@ -229,10 +278,12 @@ async def render_pin_to_file(
             'textZoneHeight': settings.get('text_zone_height', template_data.get('text_zone_height', 100)),
             'textZoneBorderColor': template_data.get('text_zone_border_color'),
             'textZoneBorderWidth': template_data.get('text_zone_border_width') or 4,
-            'textElements': template_data.get('text_elements', []),
+            # Avoid double-rendered copy; title text is rendered explicitly.
+            'textElements': [],
         },
         'content': {
             'title': page.title or '',
+            'imageUrls': image_data_urls,
             'image1Url': image_data_urls[0] if len(image_data_urls) > 0 else None,
             'image2Url': image_data_urls[1] if len(image_data_urls) > 1 else None,
             'link': page.url or '',
@@ -241,16 +292,21 @@ async def render_pin_to_file(
         'outputPath': str(output_path),
     }
 
-    # Try Node.js renderer first
+    # Try Node.js renderer first; it matches preview behavior more closely.
     if NODE_RENDERER_PATH.exists():
         try:
             result = await _render_with_nodejs(render_data)
+            if result and output_path.exists():
+                _apply_custom_font_overlay(output_path, render_data)
             return result
         except Exception as e:
             print(f"Node.js rendering failed: {e}")
 
     # Fall back to Python rendering (cairosvg + PIL)
-    return await _render_with_python(render_data)
+    result = await _render_with_python(render_data)
+    if result and output_path.exists():
+        _apply_custom_font_overlay(output_path, render_data)
+    return result
 
 
 async def _render_with_nodejs(render_data: Dict[str, Any]) -> bool:
@@ -308,9 +364,11 @@ async def _render_with_python(render_data: Dict[str, Any]) -> bool:
         img = Image.new('RGB', (width, height), 'white')
         draw = ImageDraw.Draw(img)
 
+        image_url_list = content.get('imageUrls') or []
+
         # Draw image zones
         for i, zone in enumerate(template.get('zones', [])):
-            image_url = content.get(f'image{i+1}Url')
+            image_url = image_url_list[i] if i < len(image_url_list) else content.get(f'image{i+1}Url')
             if image_url:
                 try:
                     if image_url.startswith('data:'):
@@ -366,15 +424,24 @@ async def _render_with_python(render_data: Dict[str, Any]) -> bool:
         # White background for text zone
         draw.rectangle(
             [pad_left, text_zone_y, width - pad_right, text_zone_y + text_zone_h],
-            fill='white'
+            fill=settings.get('textZoneBgColor', '#ffffff'),
         )
 
         # Draw title
         title = content.get('title', '')
         if title:
+            custom_font_file = settings.get('customFontFile') or settings.get('custom_font_file')
+            custom_font_path = None
+            if custom_font_file:
+                candidate = Path(__file__).parent.parent.parent / "storage" / "fonts" / str(custom_font_file)
+                if candidate.exists():
+                    custom_font_path = candidate
             try:
-                # Try to use a bold font
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+                if custom_font_path:
+                    font = ImageFont.truetype(str(custom_font_path), 48)
+                else:
+                    # Fallback system font
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
             except:
                 font = ImageFont.load_default()
 
@@ -405,6 +472,224 @@ async def _render_with_python(render_data: Dict[str, Any]) -> bool:
     except Exception as e:
         print(f"Python rendering failed: {e}")
         return False
+
+
+def _fit_text_lines_with_pillow(
+    draw,
+    text: str,
+    zone_width: int,
+    zone_height: int,
+    font_path: str | None,
+    fallback_font_path: str | None,
+) -> tuple[list[str], Any, int]:
+    from PIL import ImageFont
+
+    def load_font(size: int):
+        candidates = [font_path, fallback_font_path]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                return ImageFont.truetype(candidate, size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    upper = (text or "").upper()
+    words = [w for w in upper.split() if w]
+    usable_width = max(20, zone_width - 30)
+    usable_height = max(20, zone_height)
+    best_lines = [upper] if upper else [""]
+    best_font = load_font(12)
+    best_size = 12
+
+    def measure(lines: list[str], size: int):
+        font = load_font(size)
+        widths = []
+        heights = []
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            widths.append(bbox[2] - bbox[0])
+            heights.append(bbox[3] - bbox[1])
+        line_height = max(heights or [size])
+        return font, max(widths or [0]), line_height * len(lines)
+
+    def try_lines(lines: list[str]):
+        nonlocal best_lines, best_font, best_size
+        low, high = 12, 200
+        local_best = 12
+        local_font = load_font(12)
+        while low <= high:
+            mid = (low + high) // 2
+            font, max_width, total_height = measure(lines, mid)
+            if max_width <= usable_width and total_height <= usable_height:
+                local_best = mid
+                local_font = font
+                low = mid + 1
+            else:
+                high = mid - 1
+        if local_best > best_size:
+            best_lines = lines
+            best_font = local_font
+            best_size = local_best
+
+    if upper:
+        try_lines([upper])
+        if len(words) >= 2:
+            for idx in range(1, len(words)):
+                try_lines([ " ".join(words[:idx]), " ".join(words[idx:]) ])
+        if len(words) >= 4:
+            for start in range(1, len(words) - 1):
+                for end in range(start + 1, len(words)):
+                    try_lines([
+                        " ".join(words[:start]),
+                        " ".join(words[start:end]),
+                        " ".join(words[end:]),
+                    ])
+
+    return best_lines, best_font, best_size
+
+
+def _draw_text_with_pillow_effect(
+    img,
+    lines: list[str],
+    font,
+    positions: list[tuple[float, float]],
+    *,
+    text_color: str,
+    effect: str,
+    effect_color: str,
+    offset_x: int,
+    offset_y: int,
+    blur: int,
+) -> None:
+    from PIL import Image, ImageDraw, ImageFilter
+
+    if effect and effect != "none":
+        effect_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        effect_draw = ImageDraw.Draw(effect_layer)
+        for (x, y), line in zip(positions, lines):
+            if effect == "drop":
+                effect_draw.text((x + offset_x, y + offset_y), line, fill=effect_color, font=font)
+            elif effect == "echo":
+                effect_draw.text((x + offset_x, y + offset_y), line, fill=effect_color, font=font)
+                effect_draw.text((x - offset_x, y - offset_y), line, fill=effect_color, font=font)
+            elif effect == "outline":
+                effect_draw.text(
+                    (x, y),
+                    line,
+                    fill=(0, 0, 0, 0),
+                    font=font,
+                    stroke_width=max(1, abs(offset_x) or abs(offset_y) or 1),
+                    stroke_fill=effect_color,
+                )
+        if blur > 0 and effect in {"drop", "echo"}:
+            effect_layer = effect_layer.filter(ImageFilter.GaussianBlur(radius=blur))
+        composed = Image.alpha_composite(img.convert("RGBA"), effect_layer)
+        img.paste(composed.convert("RGB"))
+
+    text_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    text_draw = ImageDraw.Draw(text_layer)
+    for (x, y), line in zip(positions, lines):
+        text_draw.text((x, y), line, fill=text_color, font=font)
+    composed = Image.alpha_composite(img.convert("RGBA"), text_layer)
+    img.paste(composed.convert("RGB"))
+
+
+def _apply_custom_font_overlay(
+    output_path: Path,
+    render_data: Dict[str, Any],
+) -> None:
+    from PIL import Image, ImageDraw
+
+    settings = render_data.get("settings", {})
+    custom_font_file = settings.get("customFontFile") or settings.get("custom_font_file")
+    if not custom_font_file:
+        return
+
+    custom_font_path = Path(__file__).parent.parent.parent / "storage" / "fonts" / str(custom_font_file)
+    if not custom_font_path.exists():
+        return
+
+    img = Image.open(output_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    template = render_data["template"]
+    content = render_data["content"]
+    width = int(template["width"])
+    text_zone_y = int(template.get("textZoneY", 0))
+    text_zone_h = int(template.get("textZoneHeight", 100))
+    pad_left = int(settings.get("textZonePadLeft", 0) or 0)
+    pad_right = int(settings.get("textZonePadRight", 0) or 0)
+    text_area_w = max(20, width - pad_left - pad_right)
+    text_align = settings.get("textAlign", "left")
+    text_color = settings.get("textColor", "#000000")
+    text_effect = settings.get("textEffect", "none")
+    text_effect_color = settings.get("textEffectColor", "#000000")
+    text_effect_offset_x = int(settings.get("textEffectOffsetX", 2) or 2)
+    text_effect_offset_y = int(settings.get("textEffectOffsetY", 2) or 2)
+    text_effect_blur = int(settings.get("textEffectBlur", 0) or 0)
+    title = content.get("title", "")
+    if not title:
+        return
+
+    # Replace the title area after the main render so uploaded fonts are deterministic.
+    draw.rectangle(
+        [pad_left, text_zone_y, width - pad_right, text_zone_y + text_zone_h],
+        fill="white",
+    )
+    border_color = template.get("textZoneBorderColor")
+    if border_color:
+        border_width = int(template.get("textZoneBorderWidth") or 4)
+        half = border_width / 2
+        draw.rectangle(
+            [pad_left + half, text_zone_y + half, width - pad_right - half, text_zone_y + text_zone_h - half],
+            outline=border_color,
+            width=border_width,
+        )
+
+    fallback_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    lines, font, font_size = _fit_text_lines_with_pillow(
+        draw,
+        title,
+        text_area_w,
+        text_zone_h,
+        str(custom_font_path),
+        fallback_font,
+    )
+
+    metrics = draw.textbbox((0, 0), "A", font=font)
+    cap_height = (metrics[3] - metrics[1]) or font_size
+    line_height = font_size
+    visual_height = cap_height + (len(lines) - 1) * line_height
+    first_y = text_zone_y + (text_zone_h - visual_height) / 2
+    center_x = pad_left + text_area_w / 2
+    left_x = pad_left + 15
+    positions: list[tuple[float, float]] = []
+
+    for idx, line in enumerate(lines):
+        y = first_y + idx * line_height
+        if text_align == "left":
+            positions.append((left_x, y))
+        else:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_w = bbox[2] - bbox[0]
+            positions.append((center_x - line_w / 2, y))
+
+    _draw_text_with_pillow_effect(
+        img,
+        lines,
+        font,
+        positions,
+        text_color=text_color,
+        effect=text_effect,
+        effect_color=text_effect_color,
+        offset_x=text_effect_offset_x,
+        offset_y=text_effect_offset_y,
+        blur=text_effect_blur,
+    )
+
+    img.save(output_path, "PNG")
 
 
 async def _create_placeholder(render_data: Dict[str, Any]) -> bool:
@@ -477,8 +762,9 @@ async def generate_pin_media_url(
 
     if success and output_path.exists():
         # Update pin with hosted URL
-        # This will be served at /static/pins/{filename}
-        pin.media_url = f"/static/pins/{output_filename}"
+        # Add a cache-busting version because pin IDs are reused and browsers
+        # otherwise keep serving stale PNGs after re-rendering.
+        pin.media_url = f"/static/pins/{output_filename}?v={int(time.time())}"
         db.commit()
         return pin.media_url
 

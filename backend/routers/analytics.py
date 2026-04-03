@@ -1,24 +1,74 @@
-"""
-Analytics and activity log router.
-"""
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-from fastapi import APIRouter, Depends
+"""Analytics router."""
 from typing import List
+
+from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends
 
 from database import get_db
 from models import (
-    Website, Page, PageKeyword, Template, TemplateZone,
-    PageImage, PinDraft, ExportLog, ActivityLog, ImportLog
+    Website, Page, PageKeyword, Template,
+    PageImage, PinDraft, ExportLog
 )
 from schemas import (
     AnalyticsSummary,
-    ActivityLogResponse,
-    ImportLogResponse,
     ExportLogResponse,
 )
 
 router = APIRouter()
+
+
+@router.get("/websites-overview")
+def get_websites_overview(db: Session = Depends(get_db)):
+    """Website-centric overview used by dashboard cards."""
+    websites = db.query(Website).order_by(Website.created_at.desc()).all()
+    result = []
+
+    for site in websites:
+        page_ids = [page.id for page in site.pages]
+        enabled_pages = sum(1 for page in site.pages if page.is_enabled)
+        scraped_pages = sum(
+            1
+            for page in site.pages
+            if page.is_enabled and (page.scraped_at is not None or len(page.images) > 0)
+        )
+
+        scheduled_pins = 0
+        scheduled_until = None
+        total_pins = 0
+        generated_pages = 0
+        if page_ids:
+            pins = db.query(PinDraft).filter(PinDraft.page_id.in_(page_ids)).all()
+            total_pins = len(pins)
+            generated_pages = len({pin.page_id for pin in pins})
+            scheduled = [pin for pin in pins if pin.publish_date is not None]
+            scheduled_pins = len(scheduled)
+            if scheduled:
+                scheduled_until = max(pin.publish_date for pin in scheduled)
+
+        status = "indexed"
+        if enabled_pages == 0:
+            status = "paused"
+        elif scheduled_pins > 0:
+            status = "scheduled"
+        elif total_pins > 0:
+            status = "generated"
+
+        result.append(
+            {
+                "id": site.id,
+                "name": site.name,
+                "url": site.url,
+                "enabled_pages": enabled_pages,
+                "scraped_pages": scraped_pages,
+                "generated_pages": generated_pages,
+                "scheduled_pins": scheduled_pins,
+                "scheduled_until": scheduled_until,
+                "total_pins": total_pins,
+                "status": status,
+            }
+        )
+
+    return result
 
 
 @router.get("/summary", response_model=AnalyticsSummary)
@@ -76,36 +126,6 @@ def get_analytics_summary(db: Session = Depends(get_db)):
         exports_count=exports_count,
         exports_pins_total=exports_pins_total,
     )
-
-
-@router.get("/activity", response_model=List[ActivityLogResponse])
-def get_activity_logs(
-    limit: int = 100,
-    db: Session = Depends(get_db),
-):
-    """Get recent activity logs."""
-    logs = (
-        db.query(ActivityLog)
-        .order_by(ActivityLog.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    return logs
-
-
-@router.get("/history/import", response_model=List[ImportLogResponse])
-def get_import_history(
-    limit: int = 50,
-    db: Session = Depends(get_db),
-):
-    """Get import history."""
-    logs = (
-        db.query(ImportLog)
-        .order_by(ImportLog.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    return logs
 
 
 @router.get("/history/export", response_model=List[ExportLogResponse])

@@ -16,6 +16,7 @@ interface KeywordStatus {
   total_keywords: number;
   coverage_percent: number;
   by_period_type: Record<string, number>;
+  by_role?: Record<string, number>;
 }
 
 type PeriodType = 'always' | 'month' | 'season';
@@ -30,12 +31,14 @@ export default function Keywords() {
   const [filters, setFilters] = useState({
     websiteId: '',
     periodType: '',
+    keywordRole: '',
     search: '',
   });
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editKeyword, setEditKeyword] = useState('');
   const [editPeriodType, setEditPeriodType] = useState<PeriodType>('always');
   const [editPeriodValue, setEditPeriodValue] = useState('');
+  const [editKeywordRole, setEditKeywordRole] = useState<'selection' | 'seo'>('seo');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -65,6 +68,7 @@ export default function Keywords() {
       const response = await apiClient.listKeywordEntries({
         website_id: filters.websiteId ? Number(filters.websiteId) : undefined,
         period_type: (filters.periodType || undefined) as PeriodType | undefined,
+        keyword_role: (filters.keywordRole || undefined) as 'selection' | 'seo' | undefined,
         search: filters.search || undefined,
         limit: 1000,
       });
@@ -79,6 +83,7 @@ export default function Keywords() {
     setEditKeyword(entry.keyword);
     setEditPeriodType(entry.period_type);
     setEditPeriodValue(entry.period_value || '');
+    setEditKeywordRole(entry.keyword_role);
   }
 
   function cancelEdit() {
@@ -86,6 +91,7 @@ export default function Keywords() {
     setEditKeyword('');
     setEditPeriodType('always');
     setEditPeriodValue('');
+    setEditKeywordRole('seo');
   }
 
   async function saveEdit(entryId: number) {
@@ -103,6 +109,7 @@ export default function Keywords() {
     try {
       const response = await apiClient.updateKeywordEntry(entryId, {
         keyword,
+        keyword_role: editKeywordRole,
         period_type: editPeriodType,
         period_value: editPeriodType === 'always' ? null : editPeriodValue.trim(),
       });
@@ -159,10 +166,10 @@ export default function Keywords() {
 
   function downloadTemplate() {
     const csv = [
-      'url,keywords,period_type,period_value',
-      '"https://example.com/article1","keyword1,keyword2,keyword3","always",""',
-      '"https://example.com/article1","spring recipe,easter brunch","month","march"',
-      '"https://example.com/article2","summer dinner,bbq ideas","season","summer"',
+      'url,keywords,period_type,period_value,keyword_role',
+      '"https://example.com/article1","spring recipes,quick appetizers","month","march","selection"',
+      '"https://example.com/article1","easy snacks,party ideas","always","","seo"',
+      '"https://example.com/article2","summer dinner,bbq ideas","season","summer","selection"',
     ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -206,6 +213,10 @@ export default function Keywords() {
             <span className="mr-3">Month: <strong>{status.by_period_type.month ?? 0}</strong></span>
             <span>Season: <strong>{status.by_period_type.season ?? 0}</strong></span>
           </div>
+          <div className="mt-1 text-xs text-gray-600">
+            <span className="mr-3">Selection: <strong>{status.by_role?.selection ?? 0}</strong></span>
+            <span>SEO: <strong>{status.by_role?.seo ?? 0}</strong></span>
+          </div>
         </div>
       )}
 
@@ -213,7 +224,7 @@ export default function Keywords() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Upload CSV</h2>
         <div className="mb-4 p-4 bg-gray-50 rounded-lg">
           <p className="text-sm text-gray-700 mb-2">
-            <strong>CSV headers:</strong> <code>url,keywords,period_type,period_value</code>
+            <strong>CSV headers:</strong> <code>url,keywords,period_type,period_value,keyword_role</code>
           </p>
           <button
             onClick={downloadTemplate}
@@ -261,7 +272,7 @@ export default function Keywords() {
           </Button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
           <select
             value={filters.websiteId}
             onChange={(e) => setFilters((prev) => ({ ...prev, websiteId: e.target.value }))}
@@ -282,6 +293,15 @@ export default function Keywords() {
             <option value="month">Month</option>
             <option value="season">Season</option>
           </select>
+          <select
+            value={filters.keywordRole}
+            onChange={(e) => setFilters((prev) => ({ ...prev, keywordRole: e.target.value }))}
+            className="px-3 py-2 border border-gray-300 rounded-md"
+          >
+            <option value="">All keyword types</option>
+            <option value="selection">Selection (match pages)</option>
+            <option value="seo">SEO (generate copy)</option>
+          </select>
           <input
             type="text"
             value={filters.search}
@@ -301,6 +321,7 @@ export default function Keywords() {
                 <tr>
                   <th className="text-left p-2 border-b">Page</th>
                   <th className="text-left p-2 border-b">Keyword</th>
+                  <th className="text-left p-2 border-b">Type</th>
                   <th className="text-left p-2 border-b">Period</th>
                   <th className="text-left p-2 border-b w-40">Actions</th>
                 </tr>
@@ -324,6 +345,24 @@ export default function Keywords() {
                           />
                         ) : (
                           <span className="text-gray-900">{entry.keyword}</span>
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {isEditing ? (
+                          <select
+                            value={editKeywordRole}
+                            onChange={(e) => setEditKeywordRole(e.target.value as 'selection' | 'seo')}
+                            className="w-full px-2 py-1 border border-gray-300 rounded"
+                          >
+                            <option value="selection">selection</option>
+                            <option value="seo">seo</option>
+                          </select>
+                        ) : (
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            entry.keyword_role === 'selection' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-700'
+                          }`}>
+                            {entry.keyword_role}
+                          </span>
                         )}
                       </td>
                       <td className="p-2">
@@ -380,7 +419,7 @@ export default function Keywords() {
                 })}
                 {entries.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="p-6 text-center text-gray-500">
+                    <td colSpan={5} className="p-6 text-center text-gray-500">
                       {loadingEntries ? 'Loading keyword entries...' : 'No keyword entries found.'}
                     </td>
                   </tr>

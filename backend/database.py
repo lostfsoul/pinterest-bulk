@@ -2,14 +2,16 @@
 SQLite database setup and session management.
 """
 import os
+import re
 from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.pool import StaticPool
 
 # Ensure data directory exists
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
+FONT_DIR = Path(__file__).parent.parent / "storage" / "fonts"
+FONT_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite:///{DATA_DIR}/pinterest.db"
 
@@ -17,7 +19,6 @@ DATABASE_URL = f"sqlite:///{DATA_DIR}/pinterest.db"
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -30,8 +31,16 @@ PIN_DRAFT_MIGRATIONS = {
     "text_zone_height": "ALTER TABLE pin_drafts ADD COLUMN text_zone_height INTEGER",
     "text_zone_pad_left": "ALTER TABLE pin_drafts ADD COLUMN text_zone_pad_left INTEGER",
     "text_zone_pad_right": "ALTER TABLE pin_drafts ADD COLUMN text_zone_pad_right INTEGER",
+    "text_align": "ALTER TABLE pin_drafts ADD COLUMN text_align VARCHAR(20)",
     "font_family": "ALTER TABLE pin_drafts ADD COLUMN font_family VARCHAR(255)",
+    "custom_font_file": "ALTER TABLE pin_drafts ADD COLUMN custom_font_file VARCHAR(512)",
+    "text_zone_bg_color": "ALTER TABLE pin_drafts ADD COLUMN text_zone_bg_color VARCHAR(32)",
     "text_color": "ALTER TABLE pin_drafts ADD COLUMN text_color VARCHAR(32)",
+    "text_effect": "ALTER TABLE pin_drafts ADD COLUMN text_effect VARCHAR(20)",
+    "text_effect_color": "ALTER TABLE pin_drafts ADD COLUMN text_effect_color VARCHAR(32)",
+    "text_effect_offset_x": "ALTER TABLE pin_drafts ADD COLUMN text_effect_offset_x INTEGER",
+    "text_effect_offset_y": "ALTER TABLE pin_drafts ADD COLUMN text_effect_offset_y INTEGER",
+    "text_effect_blur": "ALTER TABLE pin_drafts ADD COLUMN text_effect_blur INTEGER",
 }
 
 PAGE_MIGRATIONS = {
@@ -39,6 +48,10 @@ PAGE_MIGRATIONS = {
     "sitemap_source": "ALTER TABLE pages ADD COLUMN sitemap_source VARCHAR(1024)",
     "sitemap_bucket": "ALTER TABLE pages ADD COLUMN sitemap_bucket VARCHAR(50)",
     "is_utility_page": "ALTER TABLE pages ADD COLUMN is_utility_page BOOLEAN NOT NULL DEFAULT 0",
+}
+
+WEBSITE_MIGRATIONS = {
+    "generation_settings": "ALTER TABLE websites ADD COLUMN generation_settings JSON",
 }
 
 PAGE_IMAGE_MIGRATIONS = {
@@ -54,6 +67,7 @@ PAGE_IMAGE_MIGRATIONS = {
 }
 
 PAGE_KEYWORD_MIGRATIONS = {
+    "keyword_role": "ALTER TABLE page_keywords ADD COLUMN keyword_role VARCHAR(20) NOT NULL DEFAULT 'seo'",
     "period_type": "ALTER TABLE page_keywords ADD COLUMN period_type VARCHAR(20) NOT NULL DEFAULT 'always'",
     "period_value": "ALTER TABLE page_keywords ADD COLUMN period_value VARCHAR(50)",
 }
@@ -83,6 +97,32 @@ AI_SETTINGS_MIGRATIONS = {
     "use_ai_by_default": "ALTER TABLE ai_settings ADD COLUMN use_ai_by_default BOOLEAN",
 }
 
+SCHEDULE_SETTINGS_MIGRATIONS = {
+    "warmup_month": "ALTER TABLE schedule_settings ADD COLUMN warmup_month BOOLEAN NOT NULL DEFAULT 0",
+    "floating_days": "ALTER TABLE schedule_settings ADD COLUMN floating_days BOOLEAN NOT NULL DEFAULT 1",
+    "max_floating_minutes": "ALTER TABLE schedule_settings ADD COLUMN max_floating_minutes INTEGER NOT NULL DEFAULT 45",
+}
+
+BOARD_MIGRATIONS = {
+    "source_page_ids": "ALTER TABLE boards ADD COLUMN source_page_ids JSON",
+}
+
+
+def create_boards_table(conn) -> None:
+    """Create boards table if it doesn't exist."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS boards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            website_id INTEGER NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            source_type VARCHAR(50) NOT NULL DEFAULT 'manual',
+            keywords VARCHAR(1024),
+            source_page_ids JSON,
+            priority INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+
 
 def get_db():
     """Dependency for getting database session."""
@@ -95,6 +135,9 @@ def get_db():
 
 def init_db():
     """Initialize database tables."""
+    # Ensure all model modules are loaded so Base metadata includes every table.
+    import models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
         columns = {
@@ -111,6 +154,14 @@ def init_db():
         }
         for column, ddl in PAGE_MIGRATIONS.items():
             if column not in page_columns:
+                conn.execute(text(ddl))
+
+        website_columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(websites)"))
+        }
+        for column, ddl in WEBSITE_MIGRATIONS.items():
+            if column not in website_columns:
                 conn.execute(text(ddl))
 
         # Migrate page_images table
@@ -204,3 +255,105 @@ def init_db():
             for column, ddl in AI_SETTINGS_MIGRATIONS.items():
                 if column not in settings_columns:
                     conn.execute(text(ddl))
+
+        if "schedule_settings" in existing_tables:
+            schedule_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(schedule_settings)"))
+            }
+            for column, ddl in SCHEDULE_SETTINGS_MIGRATIONS.items():
+                if column not in schedule_columns:
+                    conn.execute(text(ddl))
+
+        create_boards_table(conn)
+        board_columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(boards)"))
+        }
+        for column, ddl in BOARD_MIGRATIONS.items():
+            if column not in board_columns:
+                conn.execute(text(ddl))
+        create_custom_fonts_table(conn)
+        backfill_custom_fonts(conn)
+
+
+def create_custom_fonts_table(conn) -> None:
+    """Create custom_fonts table if it doesn't exist."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS custom_fonts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename VARCHAR(512) NOT NULL UNIQUE,
+            original_name VARCHAR(512),
+            family VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+
+
+def _default_font_family_from_filename(filename: str) -> str:
+    stem = Path(filename).stem
+    fallback_stem = stem.split("__", 1)[1] if "__" in stem else stem
+    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", fallback_stem.lower()):
+        return "Custom Font"
+    return fallback_stem.replace("-", " ").replace("_", " ") or "Custom Font"
+
+
+def backfill_custom_fonts(conn) -> None:
+    """Ensure custom_fonts has entries for existing files in storage/fonts."""
+    tables = {
+        row[0]
+        for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+    }
+    if "custom_fonts" not in tables:
+        return
+
+    for path in FONT_DIR.glob("*"):
+        if path.suffix.lower() not in {".ttf", ".otf", ".woff", ".woff2"}:
+            continue
+        filename = path.name
+        exists = conn.execute(
+            text("SELECT 1 FROM custom_fonts WHERE filename = :filename LIMIT 1"),
+            {"filename": filename},
+        ).first()
+        if exists:
+            continue
+
+        family = _default_font_family_from_filename(filename)
+        conn.execute(
+            text(
+                """
+                INSERT INTO custom_fonts (filename, original_name, family, created_at)
+                VALUES (:filename, :original_name, :family, CURRENT_TIMESTAMP)
+                """
+            ),
+            {
+                "filename": filename,
+                "original_name": filename,
+                "family": family,
+            },
+        )
+
+    # Repair generic labels when we can derive a better family from stored names.
+    rows = conn.execute(
+        text("SELECT id, filename, original_name, family FROM custom_fonts")
+    ).fetchall()
+    for row in rows:
+        font_id, filename, original_name, family = row
+        if (family or "").strip().lower() != "custom font":
+            continue
+        candidate = None
+        if original_name:
+            stem = Path(str(original_name)).stem
+            if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", stem.lower()):
+                candidate = stem.replace("-", " ").replace("_", " ")
+        if not candidate:
+            stem = Path(str(filename)).stem
+            if "__" in stem:
+                slug = stem.split("__", 1)[1]
+                if slug:
+                    candidate = slug.replace("-", " ").replace("_", " ")
+        if candidate:
+            conn.execute(
+                text("UPDATE custom_fonts SET family = :family WHERE id = :id"),
+                {"family": candidate, "id": font_id},
+            )

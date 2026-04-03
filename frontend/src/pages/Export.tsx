@@ -6,6 +6,7 @@ export default function Export() {
   const [pins, setPins] = useState<PinDraft[]>([]);
   const [selectedPins, setSelectedPins] = useState<Set<number>>(new Set());
   const [exporting, setExporting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [exportHistory, setExportHistory] = useState<Array<{
     id: number;
     pins_count: number;
@@ -78,9 +79,57 @@ export default function Export() {
       loadHistory();
     } catch (error) {
       console.error('Failed to export:', error);
-      alert('Failed to export CSV');
+      const message =
+        (error as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail ||
+        (error as Error)?.message ||
+        'Failed to export CSV';
+      alert(message);
     } finally {
       setExporting(false);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    const ids = Array.from(selectedPins);
+    if (ids.length === 0) {
+      alert('No selected pins to delete');
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${ids.length} selected generated pin(s) from the database? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      await apiClient.clearPins({ pin_ids: ids });
+      await loadPins();
+      await loadHistory();
+    } catch (error) {
+      console.error('Failed to delete selected pins:', error);
+      alert('Failed to delete selected pins');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleDeleteAllListed = async () => {
+    if (pins.length === 0) {
+      alert('No generated pins to delete');
+      return;
+    }
+    const ids = pins.map((pin) => pin.id);
+    const confirmed = window.confirm(`Delete all ${ids.length} listed generated pin(s) from the database? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeleting(true);
+    try {
+      await apiClient.clearPins({ pin_ids: ids });
+      await loadPins();
+      await loadHistory();
+    } catch (error) {
+      console.error('Failed to delete all listed pins:', error);
+      alert('Failed to delete pins');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -138,16 +187,30 @@ export default function Export() {
           <div className="flex flex-wrap gap-2">
             <Button
               onClick={() => handleExport(true)}
-              disabled={selectedPins.size === 0 || exporting}
+              disabled={selectedPins.size === 0 || exporting || deleting}
             >
               {exporting ? 'Exporting...' : `Export Selected (${selectedPins.size})`}
             </Button>
             <Button
               variant="secondary"
               onClick={() => handleExport(false)}
-              disabled={renderedPins.length === 0 || exporting}
+              disabled={renderedPins.length === 0 || exporting || deleting}
             >
               Export All ({renderedPins.length})
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleDeleteSelected}
+              disabled={selectedPins.size === 0 || exporting || deleting}
+            >
+              {deleting ? 'Deleting...' : `Delete Selected (${selectedPins.size})`}
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={handleDeleteAllListed}
+              disabled={pins.length === 0 || exporting || deleting}
+            >
+              {deleting ? 'Deleting...' : `Delete All Listed (${pins.length})`}
             </Button>
           </div>
         </div>

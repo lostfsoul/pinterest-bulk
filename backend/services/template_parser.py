@@ -54,13 +54,20 @@ def parse_svg_template(svg_content: str) -> Dict[str, Any]:
     logger.info(f"Parsed {len(clip_paths)} clipPaths from template")
 
     # Detect image zones from clipPaths around <image> elements
-    zones = detect_image_zones(root, clip_paths)
+    zones, image_clip_ids = detect_image_zones(root, clip_paths, width, height)
 
     # Sort zones by y-position
     zones.sort(key=lambda z: z['y'])
 
     # Detect text zone
-    text_zone_y, text_zone_height = detect_text_zone(root, zones, width, height)
+    text_zone_x, text_zone_y, text_zone_width, text_zone_height, text_align = detect_text_zone(
+        root,
+        zones,
+        width,
+        height,
+        clip_paths,
+        image_clip_ids,
+    )
 
     # Detect text zone border
     text_zone_border_color, text_zone_border_width = detect_text_zone_border(
@@ -80,8 +87,11 @@ def parse_svg_template(svg_content: str) -> Dict[str, Any]:
         'width': width,
         'height': height,
         'zones': zones,
+        'text_zone_x': text_zone_x,
         'text_zone_y': text_zone_y,
+        'text_zone_width': text_zone_width,
         'text_zone_height': text_zone_height,
+        'text_zone_align': text_align,
         'text_zone_border_color': text_zone_border_color,
         'text_zone_border_width': text_zone_border_width,
         'text_zone_text_color': text_zone_text_color,
@@ -188,12 +198,18 @@ def parse_path_bbox(d: str) -> Optional[Dict[str, float]]:
     return {'x': x, 'y': y, 'width': width, 'height': height}
 
 
-def detect_image_zones(root: ET.Element, clip_paths: Dict[str, Dict[str, float]]) -> List[Dict[str, float]]:
+def detect_image_zones(
+    root: ET.Element,
+    clip_paths: Dict[str, Dict[str, float]],
+    canvas_width: int,
+    canvas_height: int,
+) -> Tuple[List[Dict[str, float]], set[str]]:
     """Detect image zones by finding clipPaths around <image> elements.
 
     Uses parent map for proper upward traversal (like React's parentElement).
     """
     zones = []
+    image_clip_ids: set[str] = set()
 
     # Build parent map for proper upward traversal
     # This maps each child element to its parent, allowing us to walk up the tree
@@ -203,32 +219,256 @@ def detect_image_zones(root: ET.Element, clip_paths: Dict[str, Dict[str, float]]
 
     for img in root.iter():
         if img.tag.endswith('image'):
-            outermost_bbox = None
+            candidate_boxes: list[tuple[str, Dict[str, float]]] = []
+            total_transform = accumulate_element_transform(img, parent_map, root)
+            image_bbox = image_bbox_from_element(img, total_transform)
             current = img
 
-            # Walk up tree using parent map (like React's parentElement)
+            # Walk up tree and collect all clipPaths on ancestors.
             while current is not None and current != root:
                 cp_attr = current.get('clip-path')
                 if cp_attr:
                     # Extract clipPath ID from url(#id)
                     match = re.search(r'url\(#([^)]+)\)', cp_attr)
                     if match and match.group(1) in clip_paths:
-                        outermost_bbox = clip_paths[match.group(1)]
-                        logger.debug(f"Found clip-path #{match.group(1)} for image at bbox: {outermost_bbox}")
+                        cp_id = match.group(1)
+                        bbox = clip_paths[cp_id]
+                        current_transform = accumulate_element_transform(current, parent_map, root)
+                        candidate_boxes.append((cp_id, choose_image_zone_candidate(
+                            bbox,
+                            current_transform,
+                            image_bbox,
+                            canvas_width,
+                            canvas_height,
+                        )))
+                        logger.debug(f"Found clip-path #{cp_id} for image at bbox: {bbox}")
                 # Move to parent using parent map
                 current = parent_map.get(current)
 
-            if outermost_bbox:
-                zones.append(outermost_bbox.copy())
-                logger.debug(f"Added image zone: {outermost_bbox}")
+            if candidate_boxes:
+                cp_id, chosen = max(
+                    candidate_boxes,
+                    key=lambda item: score_image_zone_candidate(
+                        item[1],
+                        image_bbox,
+                        canvas_width,
+                        canvas_height,
+                    ),
+                )
+                image_clip_ids.add(cp_id)
+                zones.append(chosen.copy())
+                logger.debug(f"Added image zone from #{cp_id}: {chosen}")
             else:
-                logger.warning(f"No clip-path found for <image> element")
+                # Fallback: use image element bounds if available.
+                fallback_bbox = image_bbox
+                if fallback_bbox:
+                    zones.append(fallback_bbox)
+                    logger.debug(f"Added fallback image zone from <image> attrs: {fallback_bbox}")
+                else:
+                    logger.warning(f"No clip-path found for <image> element")
 
-    logger.info(f"Detected {len(zones)} image zones total")
-    return zones
+    # De-duplicate near-identical boxes (same clip path reused by multiple images)
+    deduped: list[Dict[str, float]] = []
+    seen_keys: set[tuple[int, int, int, int]] = set()
+    for zone in zones:
+        key = (
+            int(round(zone["x"])),
+            int(round(zone["y"])),
+            int(round(zone["width"])),
+            int(round(zone["height"])),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(zone)
+
+    # Drop giant full-canvas zones when more specific zones exist.
+    canvas_area = float(canvas_width * canvas_height)
+    filtered = deduped
+    if len(deduped) > 1:
+        non_giant = [
+            z for z in deduped
+            if (z["width"] * z["height"]) < (canvas_area * 0.85)
+        ]
+        if non_giant:
+            filtered = non_giant
+
+    logger.info(f"Detected {len(filtered)} image zones total")
+    return filtered, image_clip_ids
 
 
-def detect_text_zone(root: ET.Element, zones: List[Dict[str, float]], canvas_width: int, canvas_height: int) -> Tuple[int, int]:
+def parse_transform_components(transform: str) -> tuple[float, float, float, float]:
+    """Parse translate/matrix and return (tx, ty, sx, sy)."""
+    tx = 0.0
+    ty = 0.0
+    sx = 1.0
+    sy = 1.0
+    if not transform:
+        return tx, ty, sx, sy
+
+    translate_match = re.search(r"translate\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", transform)
+    if translate_match:
+        tx += float(translate_match.group(1))
+        ty += float(translate_match.group(2))
+    matrix_match = re.search(
+        r"matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)",
+        transform,
+    )
+    if matrix_match:
+        sx *= float(matrix_match.group(1))
+        sy *= float(matrix_match.group(4))
+        tx += float(matrix_match.group(5))
+        ty += float(matrix_match.group(6))
+
+    return tx, ty, sx, sy
+
+
+def accumulate_element_transform(
+    elem: ET.Element,
+    parent_map: Dict[ET.Element, ET.Element],
+    root: ET.Element,
+) -> tuple[float, float, float, float]:
+    """Accumulate translate/scale transform from element up to root."""
+    tx = 0.0
+    ty = 0.0
+    sx = 1.0
+    sy = 1.0
+
+    current: Optional[ET.Element] = elem
+    while current is not None and current != root:
+        c_tx, c_ty, c_sx, c_sy = parse_transform_components(current.get("transform") or "")
+        tx = tx * c_sx + c_tx
+        ty = ty * c_sy + c_ty
+        sx *= c_sx
+        sy *= c_sy
+        current = parent_map.get(current)
+
+    return tx, ty, sx, sy
+
+
+def apply_bbox_transform(
+    bbox: Dict[str, float],
+    transform: tuple[float, float, float, float],
+) -> Dict[str, float]:
+    tx, ty, sx, sy = transform
+    return {
+        "x": bbox["x"] * sx + tx,
+        "y": bbox["y"] * sy + ty,
+        "width": abs(bbox["width"] * sx),
+        "height": abs(bbox["height"] * sy),
+    }
+
+
+def image_bbox_from_element(
+    img: ET.Element,
+    transform: tuple[float, float, float, float],
+) -> Optional[Dict[str, float]]:
+    try:
+        x = float(img.get("x", 0))
+        y = float(img.get("y", 0))
+        w = float(img.get("width", 0))
+        h = float(img.get("height", 0))
+    except ValueError:
+        return None
+    if w <= 10 or h <= 10:
+        return None
+    return apply_bbox_transform({"x": x, "y": y, "width": w, "height": h}, transform)
+
+
+def clamp_bbox_to_canvas(
+    bbox: Dict[str, float],
+    canvas_width: int,
+    canvas_height: int,
+) -> Optional[Dict[str, float]]:
+    x1 = max(0.0, bbox["x"])
+    y1 = max(0.0, bbox["y"])
+    x2 = min(float(canvas_width), bbox["x"] + bbox["width"])
+    y2 = min(float(canvas_height), bbox["y"] + bbox["height"])
+    if (x2 - x1) <= 10 or (y2 - y1) <= 10:
+        return None
+    return {
+        "x": x1,
+        "y": y1,
+        "width": x2 - x1,
+        "height": y2 - y1,
+    }
+
+
+def bbox_overlap_area(a: Dict[str, float], b: Dict[str, float]) -> float:
+    x1 = max(a["x"], b["x"])
+    y1 = max(a["y"], b["y"])
+    x2 = min(a["x"] + a["width"], b["x"] + b["width"])
+    y2 = min(a["y"] + a["height"], b["y"] + b["height"])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return (x2 - x1) * (y2 - y1)
+
+
+def score_image_zone_candidate(
+    candidate: Dict[str, float],
+    image_bbox: Optional[Dict[str, float]],
+    canvas_width: int,
+    canvas_height: int,
+) -> tuple[float, float, float]:
+    area = max(candidate["width"] * candidate["height"], 1.0)
+    overlap_ratio = 0.0
+    size_delta = area
+    if image_bbox:
+        image_area = max(image_bbox["width"] * image_bbox["height"], 1.0)
+        overlap = bbox_overlap_area(candidate, image_bbox)
+        overlap_ratio = overlap / image_area
+        size_delta = abs(area - image_area)
+    canvas_penalty = 0.0
+    if (
+        candidate["x"] < 0
+        or candidate["y"] < 0
+        or (candidate["x"] + candidate["width"]) > canvas_width
+        or (candidate["y"] + candidate["height"]) > canvas_height
+    ):
+        canvas_penalty = 1.0
+    return (
+        overlap_ratio - canvas_penalty,
+        -size_delta,
+        -area,
+    )
+
+
+def choose_image_zone_candidate(
+    raw_bbox: Dict[str, float],
+    current_transform: tuple[float, float, float, float],
+    image_bbox: Optional[Dict[str, float]],
+    canvas_width: int,
+    canvas_height: int,
+) -> Dict[str, float]:
+    candidates: list[Dict[str, float]] = []
+    raw_clamped = clamp_bbox_to_canvas(raw_bbox, canvas_width, canvas_height)
+    if raw_clamped:
+        candidates.append(raw_clamped)
+    transformed = apply_bbox_transform(raw_bbox, current_transform)
+    transformed_clamped = clamp_bbox_to_canvas(transformed, canvas_width, canvas_height)
+    if transformed_clamped:
+        candidates.append(transformed_clamped)
+    if not candidates:
+        return raw_bbox
+    return max(
+        candidates,
+        key=lambda candidate: score_image_zone_candidate(
+            candidate,
+            image_bbox,
+            canvas_width,
+            canvas_height,
+        ),
+    )
+
+
+def detect_text_zone(
+    root: ET.Element,
+    zones: List[Dict[str, float]],
+    canvas_width: int,
+    canvas_height: int,
+    clip_paths: Dict[str, Dict[str, float]],
+    image_clip_ids: set[str],
+) -> Tuple[int, int, int, int, str]:
     """Detect text zone position and height.
 
     Strategy:
@@ -237,36 +477,182 @@ def detect_text_zone(root: ET.Element, zones: List[Dict[str, float]], canvas_wid
     3. Default to 44% from top with 12% height
     """
     # Default values
+    text_zone_x = 0
     text_zone_y = int(round(canvas_height * 0.44))
+    text_zone_width = canvas_width
     text_zone_height = int(round(canvas_height * 0.12))
+    text_align = "center"
+
+    image_bottom = max((z['y'] + z['height'] for z in zones), default=canvas_height * 0.35)
+
+    # Build parent map once for transform traversal.
+    parent_map = {c: p for p in root.iter() for c in p}
+
+    # Prefer explicit text containers from template structure.
+    foreign_objects: list[dict[str, float]] = []
+    for elem in root.iter():
+        if not elem.tag.endswith('foreignObject'):
+            continue
+        try:
+            x = float(elem.get('x', 0))
+            y = float(elem.get('y', 0))
+            w = float(elem.get('width', 0))
+            h = float(elem.get('height', 0))
+        except ValueError:
+            continue
+        if w > canvas_width * 0.35 and h > 20 and y >= image_bottom - 20:
+            foreign_objects.append({'x': x, 'y': y, 'width': w, 'height': h})
+
+    if foreign_objects:
+        x = min(item['x'] for item in foreign_objects)
+        y = min(item['y'] for item in foreign_objects)
+        right = max(item['x'] + item['width'] for item in foreign_objects)
+        bottom = max(item['y'] + item['height'] for item in foreign_objects)
+        text_zone_x = int(round(max(0, x)))
+        text_zone_y = int(round(max(0, y)))
+        text_zone_width = int(round(min(canvas_width, right) - text_zone_x))
+        text_zone_height = int(round(min(canvas_height, bottom) - text_zone_y))
+        text_align = "left"
+        if text_zone_width > 10 and text_zone_height > 10:
+            return text_zone_x, text_zone_y, text_zone_width, text_zone_height, text_align
+
+    # Canva exports often flatten text to path groups clipped by non-image clipPaths.
+    # Detect those groups and merge top candidates into a usable text zone.
+    path_text_blocks: list[dict[str, float]] = []
+    for elem in root.iter():
+        cp_attr = elem.get("clip-path")
+        if not cp_attr:
+            continue
+        match = re.search(r"url\(#([^)]+)\)", cp_attr)
+        if not match:
+            continue
+        cp_id = match.group(1)
+        if cp_id in image_clip_ids:
+            continue
+        bbox = clip_paths.get(cp_id)
+        if not bbox:
+            continue
+        area = bbox["width"] * bbox["height"]
+        if area < 400 or area > (canvas_width * canvas_height * 0.8):
+            continue
+
+        has_path = any(child.tag.endswith("path") for child in elem.iter())
+        has_image = any(child.tag.endswith("image") for child in elem.iter())
+        if not has_path or has_image:
+            continue
+
+        tx = 0.0
+        ty = 0.0
+        current: Optional[ET.Element] = elem
+        while current is not None and current != root:
+            transform = current.get("transform") or ""
+            translate_match = re.search(r"translate\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)", transform)
+            if translate_match:
+                tx += float(translate_match.group(1))
+                ty += float(translate_match.group(2))
+            matrix_match = re.search(
+                r"matrix\(\s*[-\d.]+\s*,\s*[-\d.]+\s*,\s*[-\d.]+\s*,\s*[-\d.]+\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)",
+                transform,
+            )
+            if matrix_match:
+                tx += float(matrix_match.group(1))
+                ty += float(matrix_match.group(2))
+            current = parent_map.get(current)
+
+        path_text_blocks.append({
+            "x": bbox["x"] + tx,
+            "y": bbox["y"] + ty,
+            "width": bbox["width"],
+            "height": bbox["height"],
+        })
+
+    if path_text_blocks:
+        path_text_blocks.sort(key=lambda b: b["width"] * b["height"], reverse=True)
+        top_blocks = path_text_blocks[:2]
+        x = min(item["x"] for item in top_blocks)
+        y = min(item["y"] for item in top_blocks)
+        right = max(item["x"] + item["width"] for item in top_blocks)
+        bottom = max(item["y"] + item["height"] for item in top_blocks)
+        text_zone_x = int(round(max(0, x)))
+        text_zone_y = int(round(max(0, y)))
+        text_zone_width = int(round(min(canvas_width, right) - text_zone_x))
+        text_zone_height = int(round(min(canvas_height, bottom) - text_zone_y))
+        text_align = "center"
+        if text_zone_width > 10 and text_zone_height > 10:
+            return text_zone_x, text_zone_y, text_zone_width, text_zone_height, text_align
+
+    # Next, detect a dedicated text background rect below image blocks.
+    rect_candidates: list[dict[str, float]] = []
+    for elem in root.iter():
+        if not elem.tag.endswith('rect'):
+            continue
+        if elem.get('clip-path'):
+            continue
+        try:
+            x = float(elem.get('x', 0))
+            y = float(elem.get('y', 0))
+            w = float(elem.get('width', 0))
+            h = float(elem.get('height', 0))
+        except ValueError:
+            continue
+        if w < canvas_width * 0.5 or h < canvas_height * 0.08:
+            continue
+        if y < image_bottom - 20:
+            continue
+        rect_candidates.append({'x': x, 'y': y, 'width': w, 'height': h})
+
+    if rect_candidates:
+        best = max(rect_candidates, key=lambda r: r['width'] * r['height'])
+        text_zone_x = int(round(max(0, best['x'])))
+        text_zone_y = int(round(max(0, best['y'])))
+        text_zone_width = int(round(min(canvas_width, best['x'] + best['width']) - text_zone_x))
+        text_zone_height = int(round(min(canvas_height, best['y'] + best['height']) - text_zone_y))
+        text_align = "left"
+        if text_zone_width > 10 and text_zone_height > 10:
+            return text_zone_x, text_zone_y, text_zone_width, text_zone_height, text_align
 
     if len(zones) >= 2:
-        bottom1 = zones[0]['y'] + zones[0]['height']
-        top2 = zones[1]['y']
-        gap_center = (bottom1 + top2) / 2
+        # For 3+ image templates, find the largest vertical gap between consecutive zones.
+        # This is a more stable default text region than always using first two zones.
+        gaps: list[tuple[float, float]] = []
+        for idx in range(len(zones) - 1):
+            gap_top = zones[idx]['y'] + zones[idx]['height']
+            gap_bottom = zones[idx + 1]['y']
+            if gap_bottom > gap_top + 8:
+                gaps.append((gap_top, gap_bottom))
 
-        # Try to find a matching clipPath
-        clip_paths = parse_clip_paths(root)
+        chosen_gap: tuple[float, float] | None = None
+        if gaps:
+            chosen_gap = max(gaps, key=lambda item: item[1] - item[0])
+        else:
+            # No clear gap: fallback to first two zones
+            chosen_gap = (
+                zones[0]['y'] + zones[0]['height'],
+                zones[1]['y'],
+            )
+
+        bottom1, top2 = chosen_gap
+
+        # Try to find a matching wide clipPath around chosen gap center.
         best_cp = None
         best_area = 0
-
         for bbox in clip_paths.values():
             if bbox['width'] < canvas_width * 0.5:
                 continue
-            if bbox['height'] > canvas_height * 0.25:
+            if bbox['height'] > canvas_height * 0.35:
                 continue
-
             cp_center = bbox['y'] + bbox['height'] / 2
             if cp_center < bottom1 - 40 or cp_center > top2 + 40:
                 continue
-
             area = bbox['width'] * bbox['height']
             if area > best_area:
                 best_area = area
                 best_cp = bbox
 
         if best_cp:
+            text_zone_x = int(round(best_cp['x']))
             text_zone_y = int(round(best_cp['y']))
+            text_zone_width = int(round(best_cp['width']))
             text_zone_height = int(round(best_cp['height']))
         elif top2 > bottom1:
             text_zone_y = int(round(bottom1))
@@ -276,7 +662,7 @@ def detect_text_zone(root: ET.Element, zones: List[Dict[str, float]], canvas_wid
         text_zone_y = int(round(zones[0]['y'] + zones[0]['height']))
         text_zone_height = int(round(canvas_height * 0.12))
 
-    return text_zone_y, text_zone_height
+    return text_zone_x, text_zone_y, text_zone_width, text_zone_height, text_align
 
 
 def detect_text_zone_border(
@@ -424,8 +810,7 @@ def strip_placeholders(svg_content: str, text_zone_y: int, text_zone_height: int
     tz_top_strict = text_zone_y - 10
     tz_bottom_strict = text_zone_y + text_zone_height + 10
 
-    # Find and remove Canva-style placeholder text:
-    # Pattern: <g fill-opacity><g transform="translate(x,Y)"> where Y is in text zone
+    # Find and remove Canva-style placeholder text groups anywhere in the template.
     elements_to_remove = []
 
     for elem in root.iter():
@@ -449,16 +834,9 @@ def strip_placeholders(svg_content: str, text_zone_y: int, text_zone_height: int
         if not child_transform_elem:
             continue
 
-        # Extract Y coordinate from transform
-        transform = child_transform_elem.get('transform')
-        match = re.search(r'translate\(\s*[\d.-]+\s*,\s*([\d.-]+)\s*\)', transform)
-        if not match:
-            continue
-
-        ty = float(match.group(1))
-
-        # Check if Y is in text zone
-        if tz_top_strict <= ty <= tz_bottom_strict:
+        has_path_descendants = any(desc.tag.endswith('path') for desc in elem.iter())
+        has_image_descendants = any(desc.tag.endswith('image') for desc in elem.iter())
+        if has_path_descendants and not has_image_descendants:
             elements_to_remove.append(elem)
 
     # Remove identified elements using parent map
@@ -469,7 +847,7 @@ def strip_placeholders(svg_content: str, text_zone_y: int, text_zone_height: int
 
     text_elements_to_remove = []
     for elem in root.iter():
-        if elem.tag.endswith('text') and is_text_in_zone(elem, text_zone_y, text_zone_height):
+        if elem.tag.endswith('text'):
             text_elements_to_remove.append(elem)
 
     for elem in text_elements_to_remove:

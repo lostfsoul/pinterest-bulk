@@ -26,6 +26,11 @@ def get_schedule_settings(db: Session = Depends(get_db)):
         db.commit()
         db.refresh(settings)
 
+    if settings.max_floating_minutes < 0:
+        settings.max_floating_minutes = 0
+        db.commit()
+        db.refresh(settings)
+
     return settings
 
 
@@ -45,6 +50,9 @@ def update_schedule_settings(
     settings.end_hour = update.end_hour
     settings.min_days_reuse = update.min_days_reuse
     settings.random_minutes = update.random_minutes
+    settings.warmup_month = update.warmup_month
+    settings.floating_days = update.floating_days
+    settings.max_floating_minutes = update.max_floating_minutes
 
     db.commit()
     db.refresh(settings)
