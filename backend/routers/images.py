@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 import httpx
 
 from database import get_db
-from models import Page, PageImage, PageKeyword, Website, GlobalExcludedImage
+from models import Page, PageImage, SEOKeyword, Website, GlobalExcludedImage
 from schemas import (
     PageImageResponse,
     PageWithImages,
@@ -352,10 +352,14 @@ def list_image_pages(
     )
     keyword_stats = (
         db.query(
-            PageKeyword.page_id.label("page_id"),
-            func.count(PageKeyword.id).label("keyword_count"),
+            SEOKeyword.url.label("page_url"),
+            (
+                func.length(SEOKeyword.keywords)
+                - func.length(func.replace(SEOKeyword.keywords, ",", ""))
+                + 1
+            ).label("keyword_count"),
         )
-        .group_by(PageKeyword.page_id)
+        .filter(func.trim(func.coalesce(SEOKeyword.keywords, "")) != "")
         .subquery()
     )
 
@@ -380,7 +384,7 @@ def list_image_pages(
         )
         .join(Website, Website.id == Page.website_id)
         .outerjoin(image_stats, image_stats.c.page_id == Page.id)
-        .outerjoin(keyword_stats, keyword_stats.c.page_id == Page.id)
+        .outerjoin(keyword_stats, keyword_stats.c.page_url == Page.url)
         .order_by(Website.name.asc(), Page.created_at.desc())
     )
 

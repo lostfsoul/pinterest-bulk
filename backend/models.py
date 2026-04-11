@@ -28,8 +28,8 @@ class Website(Base):
     import_logs: Mapped[list["ImportLog"]] = relationship(
         "ImportLog", back_populates="website", cascade="all, delete-orphan"
     )
-    boards: Mapped[list["Board"]] = relationship(
-        "Board", back_populates="website", cascade="all, delete-orphan"
+    trend_keywords: Mapped[list["WebsiteTrendKeyword"]] = relationship(
+        "WebsiteTrendKeyword", back_populates="website", cascade="all, delete-orphan"
     )
 
 
@@ -54,9 +54,6 @@ class Page(Base):
     )
 
     website: Mapped["Website"] = relationship("Website", back_populates="pages")
-    keywords: Mapped[list["PageKeyword"]] = relationship(
-        "PageKeyword", back_populates="page", cascade="all, delete-orphan"
-    )
     images: Mapped[list["PageImage"]] = relationship(
         "PageImage", back_populates="page", cascade="all, delete-orphan"
     )
@@ -65,20 +62,34 @@ class Page(Base):
     )
 
 
-class PageKeyword(Base):
-    """Keywords associated with a page."""
-    __tablename__ = "page_keywords"
+class SEOKeyword(Base):
+    """SEO keywords keyed by page URL."""
+    __tablename__ = "seo_keywords"
+
+    url: Mapped[str] = mapped_column(String(2048), primary_key=True)
+    keywords: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+
+class WebsiteTrendKeyword(Base):
+    """Trend keywords used to rank pages for generation selection."""
+    __tablename__ = "website_trend_keywords"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    page_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("pages.id"), nullable=False, index=True
+    website_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("websites.id"), nullable=False, index=True
     )
     keyword: Mapped[str] = mapped_column(String(255), nullable=False)
-    keyword_role: Mapped[str] = mapped_column(String(20), default="seo", nullable=False)
     period_type: Mapped[str] = mapped_column(String(20), default="always", nullable=False)
     period_value: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
 
-    page: Mapped["Page"] = relationship("Page", back_populates="keywords")
+    website: Mapped["Website"] = relationship("Website", back_populates="trend_keywords")
 
 
 class Template(Base):
@@ -89,6 +100,7 @@ class Template(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     overlay_svg: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    template_manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -232,6 +244,7 @@ class ScheduleSettings(Base):
     start_hour: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
     end_hour: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     min_days_reuse: Mapped[int] = mapped_column(Integer, default=31, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
     random_minutes: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     warmup_month: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     floating_days: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -335,23 +348,3 @@ class AISettings(Base):
     )
     default_language: Mapped[str] = mapped_column(String(50), default="English", nullable=False)
     use_ai_by_default: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-
-
-class Board(Base):
-    """Board names used for CSV export assignment."""
-    __tablename__ = "boards"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    website_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("websites.id"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    source_type: Mapped[str] = mapped_column(String(50), default="manual", nullable=False)
-    keywords: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    source_page_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, nullable=False
-    )
-
-    website: Mapped["Website"] = relationship("Website", back_populates="boards")

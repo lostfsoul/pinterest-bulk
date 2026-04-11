@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import apiClient, { KeywordEntry, Website } from '../services/api';
 import { Button } from '../components/Button';
 
@@ -15,105 +15,114 @@ interface KeywordStatus {
   pages_with_keywords: number;
   total_keywords: number;
   coverage_percent: number;
-  by_period_type: Record<string, number>;
-  by_role?: Record<string, number>;
 }
-
-type PeriodType = 'always' | 'month' | 'season';
 
 export default function Keywords() {
   const [status, setStatus] = useState<KeywordStatus | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [websites, setWebsites] = useState<Website[]>([]);
+  const [activeWebsiteId, setActiveWebsiteId] = useState<number | null>(null);
   const [entries, setEntries] = useState<KeywordEntry[]>([]);
   const [loadingEntries, setLoadingEntries] = useState(false);
-  const [filters, setFilters] = useState({
-    websiteId: '',
-    periodType: '',
-    keywordRole: '',
-    search: '',
-  });
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editKeyword, setEditKeyword] = useState('');
-  const [editPeriodType, setEditPeriodType] = useState<PeriodType>('always');
-  const [editPeriodValue, setEditPeriodValue] = useState('');
-  const [editKeywordRole, setEditKeywordRole] = useState<'selection' | 'seo'>('seo');
+  const [editingUrl, setEditingUrl] = useState<string | null>(null);
+  const [editKeywords, setEditKeywords] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    loadInitial().catch((error) => {
-      console.error('Failed to load keywords page:', error);
-    });
+    void loadInitial();
   }, []);
 
+  useEffect(() => {
+    const onWebsiteSwitch = (event: Event) => {
+      const custom = event as CustomEvent<number>;
+      setActiveWebsiteId(custom.detail ?? null);
+    };
+    window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
+    return () => window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
+  }, []);
+
+  useEffect(() => {
+    void loadEntries();
+  }, [activeWebsiteId]);
+
+  const activeWebsite = useMemo(
+    () => websites.find((website) => website.id === activeWebsiteId) ?? null,
+    [websites, activeWebsiteId],
+  );
+
   async function loadInitial() {
-    const [statusRes, websitesRes] = await Promise.all([
-      apiClient.getKeywordsStatus(),
-      apiClient.listWebsites(),
-    ]);
-    setStatus(statusRes.data);
-    setWebsites(websitesRes.data);
-    await loadEntries();
+    try {
+      const [statusRes, websitesRes] = await Promise.all([
+        apiClient.getKeywordsStatus(),
+        apiClient.listWebsites(),
+      ]);
+      setStatus(statusRes.data);
+      setWebsites(websitesRes.data);
+
+      const stored = localStorage.getItem('active_website_id');
+      const storedId = stored ? Number(stored) : null;
+      const nextWebsiteId =
+        (storedId && websitesRes.data.some((website) => website.id === storedId) ? storedId : null) ??
+        websitesRes.data[0]?.id ??
+        null;
+      setActiveWebsiteId(nextWebsiteId);
+    } catch (error) {
+      console.error('Failed to load keywords page:', error);
+    }
   }
 
   async function loadStatus() {
-    const response = await apiClient.getKeywordsStatus();
-    setStatus(response.data);
+    try {
+      const response = await apiClient.getKeywordsStatus();
+      setStatus(response.data);
+    } catch (error) {
+      console.error('Failed to refresh keyword status:', error);
+    }
   }
 
   async function loadEntries() {
+    if (!activeWebsiteId) {
+      setEntries([]);
+      return;
+    }
+
     setLoadingEntries(true);
     try {
       const response = await apiClient.listKeywordEntries({
-        website_id: filters.websiteId ? Number(filters.websiteId) : undefined,
-        period_type: (filters.periodType || undefined) as PeriodType | undefined,
-        keyword_role: (filters.keywordRole || undefined) as 'selection' | 'seo' | undefined,
-        search: filters.search || undefined,
+        website_id: activeWebsiteId,
         limit: 1000,
       });
       setEntries(response.data);
+    } catch (error) {
+      console.error('Failed to load keyword entries:', error);
+      setEntries([]);
     } finally {
       setLoadingEntries(false);
     }
   }
 
   function startEdit(entry: KeywordEntry) {
-    setEditingId(entry.id);
-    setEditKeyword(entry.keyword);
-    setEditPeriodType(entry.period_type);
-    setEditPeriodValue(entry.period_value || '');
-    setEditKeywordRole(entry.keyword_role);
+    setEditingUrl(entry.url);
+    setEditKeywords(entry.keywords);
   }
 
   function cancelEdit() {
-    setEditingId(null);
-    setEditKeyword('');
-    setEditPeriodType('always');
-    setEditPeriodValue('');
-    setEditKeywordRole('seo');
+    setEditingUrl(null);
+    setEditKeywords('');
   }
 
-  async function saveEdit(entryId: number) {
-    const keyword = editKeyword.trim();
-    if (!keyword) {
-      alert('Keyword cannot be empty');
-      return;
-    }
-    if (editPeriodType !== 'always' && !editPeriodValue.trim()) {
-      alert('Period value is required for month/season');
+  async function saveEdit(entryUrl: string) {
+    const keywords = editKeywords.trim();
+    if (!keywords) {
+      alert('Keywords cannot be empty');
       return;
     }
 
     setSaving(true);
     try {
-      const response = await apiClient.updateKeywordEntry(entryId, {
-        keyword,
-        keyword_role: editKeywordRole,
-        period_type: editPeriodType,
-        period_value: editPeriodType === 'always' ? null : editPeriodValue.trim(),
-      });
-      setEntries((prev) => prev.map((item) => (item.id === entryId ? response.data : item)));
+      const response = await apiClient.updateKeywordEntry({ url: entryUrl, keywords });
+      setEntries((prev) => prev.map((item) => (item.url === entryUrl ? response.data : item)));
       await loadStatus();
       cancelEdit();
     } catch (error) {
@@ -124,11 +133,11 @@ export default function Keywords() {
     }
   }
 
-  async function removeEntry(entryId: number) {
+  async function removeEntry(entryUrl: string) {
     if (!confirm('Delete this keyword entry?')) return;
     try {
-      await apiClient.deleteKeywordEntry(entryId);
-      setEntries((prev) => prev.filter((item) => item.id !== entryId));
+      await apiClient.deleteKeywordEntry(entryUrl);
+      setEntries((prev) => prev.filter((item) => item.url !== entryUrl));
       await loadStatus();
     } catch (error) {
       console.error('Failed to delete keyword:', error);
@@ -145,10 +154,7 @@ export default function Keywords() {
       return;
     }
 
-    uploadFile(file).catch((error) => {
-      console.error('Failed to upload keywords:', error);
-      alert('Failed to upload keywords. Check the file format.');
-    });
+    void uploadFile(file);
     e.target.value = '';
   };
 
@@ -159,6 +165,9 @@ export default function Keywords() {
       const response = await apiClient.uploadKeywords(file);
       setUploadResult(response.data);
       await Promise.all([loadStatus(), loadEntries()]);
+    } catch (error) {
+      console.error('Failed to upload keywords:', error);
+      alert('Failed to upload keywords. Check the file format.');
     } finally {
       setUploading(false);
     }
@@ -166,10 +175,9 @@ export default function Keywords() {
 
   function downloadTemplate() {
     const csv = [
-      'url,keywords,period_type,period_value,keyword_role',
-      '"https://example.com/article1","spring recipes,quick appetizers","month","march","selection"',
-      '"https://example.com/article1","easy snacks,party ideas","always","","seo"',
-      '"https://example.com/article2","summer dinner,bbq ideas","season","summer","selection"',
+      'url,keywords',
+      '"https://example.com/article1","summer corn salad,bright side dish"',
+      '"https://example.com/article2","quick family dinner,easy weeknight meal"',
     ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -184,7 +192,7 @@ export default function Keywords() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Keywords</h1>
-        <p className="text-gray-500 mt-1">Upload, review, and edit keyword entries</p>
+        <p className="text-gray-500 mt-1">Manage SEO keywords for the currently selected website</p>
       </div>
 
       {status && (
@@ -208,15 +216,6 @@ export default function Keywords() {
               <p className="text-2xl font-bold text-gray-900">{status.coverage_percent}%</p>
             </div>
           </div>
-          <div className="mt-4 text-xs text-gray-600">
-            <span className="mr-3">Always: <strong>{status.by_period_type.always ?? 0}</strong></span>
-            <span className="mr-3">Month: <strong>{status.by_period_type.month ?? 0}</strong></span>
-            <span>Season: <strong>{status.by_period_type.season ?? 0}</strong></span>
-          </div>
-          <div className="mt-1 text-xs text-gray-600">
-            <span className="mr-3">Selection: <strong>{status.by_role?.selection ?? 0}</strong></span>
-            <span>SEO: <strong>{status.by_role?.seo ?? 0}</strong></span>
-          </div>
         </div>
       )}
 
@@ -224,7 +223,7 @@ export default function Keywords() {
         <h2 className="text-lg font-semibold text-gray-900 mb-4">Upload CSV</h2>
         <div className="mb-4 p-4 bg-gray-50 rounded-lg">
           <p className="text-sm text-gray-700 mb-2">
-            <strong>CSV headers:</strong> <code>url,keywords,period_type,period_value,keyword_role</code>
+            <strong>CSV headers:</strong> <code>url,keywords</code>
           </p>
           <button
             onClick={downloadTemplate}
@@ -248,12 +247,18 @@ export default function Keywords() {
       </div>
 
       {uploadResult && (
-        <div className={`rounded-lg border p-6 ${
-          uploadResult.matched_pages > 0 ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'
-        }`}>
-          <h3 className={`font-semibold mb-4 ${
-            uploadResult.matched_pages > 0 ? 'text-green-900' : 'text-yellow-900'
-          }`}>
+        <div
+          className={`rounded-lg border p-6 ${
+            uploadResult.matched_pages > 0
+              ? 'bg-green-50 border-green-200'
+              : 'bg-yellow-50 border-yellow-200'
+          }`}
+        >
+          <h3
+            className={`font-semibold mb-4 ${
+              uploadResult.matched_pages > 0 ? 'text-green-900' : 'text-yellow-900'
+            }`}
+          >
             Upload Complete
           </h3>
           <div className="space-y-2 text-sm">
@@ -265,51 +270,18 @@ export default function Keywords() {
       )}
 
       <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-900">Manage Keywords</h2>
-          <Button size="sm" variant="secondary" onClick={loadEntries} disabled={loadingEntries}>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">SEO Keywords</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              {activeWebsite
+                ? `Showing keywords for: ${activeWebsite.name}`
+                : 'No website selected. Select a website from the sidebar.'}
+            </p>
+          </div>
+          <Button size="sm" variant="secondary" onClick={loadEntries} disabled={loadingEntries || !activeWebsiteId}>
             Refresh
           </Button>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-          <select
-            value={filters.websiteId}
-            onChange={(e) => setFilters((prev) => ({ ...prev, websiteId: e.target.value }))}
-            className="px-3 py-2 border border-gray-300 rounded-md"
-          >
-            <option value="">All websites</option>
-            {websites.map((website) => (
-              <option key={website.id} value={website.id}>{website.name}</option>
-            ))}
-          </select>
-          <select
-            value={filters.periodType}
-            onChange={(e) => setFilters((prev) => ({ ...prev, periodType: e.target.value }))}
-            className="px-3 py-2 border border-gray-300 rounded-md"
-          >
-            <option value="">All periods</option>
-            <option value="always">Always</option>
-            <option value="month">Month</option>
-            <option value="season">Season</option>
-          </select>
-          <select
-            value={filters.keywordRole}
-            onChange={(e) => setFilters((prev) => ({ ...prev, keywordRole: e.target.value }))}
-            className="px-3 py-2 border border-gray-300 rounded-md"
-          >
-            <option value="">All keyword types</option>
-            <option value="selection">Selection (match pages)</option>
-            <option value="seo">SEO (generate copy)</option>
-          </select>
-          <input
-            type="text"
-            value={filters.search}
-            onChange={(e) => setFilters((prev) => ({ ...prev, search: e.target.value }))}
-            placeholder="Search keyword, title, or URL"
-            className="px-3 py-2 border border-gray-300 rounded-md"
-          />
-          <Button size="sm" onClick={loadEntries}>Apply</Button>
         </div>
 
         <div className="text-sm text-gray-600">{entries.length} entries</div>
@@ -319,84 +291,34 @@ export default function Keywords() {
             <table className="min-w-full text-sm">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  <th className="text-left p-2 border-b">Page</th>
-                  <th className="text-left p-2 border-b">Keyword</th>
-                  <th className="text-left p-2 border-b">Type</th>
-                  <th className="text-left p-2 border-b">Period</th>
+                  <th className="text-left p-2 border-b">URL</th>
+                  <th className="text-left p-2 border-b">Keywords</th>
                   <th className="text-left p-2 border-b w-40">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {entries.map((entry) => {
-                  const isEditing = editingId === entry.id;
+                  const isEditing = editingUrl === entry.url;
                   return (
-                    <tr key={entry.id} className="border-b align-top">
+                    <tr key={entry.url} className="border-b align-top">
                       <td className="p-2">
-                        <div className="text-xs text-gray-500 mb-1">{entry.website_name}</div>
-                        <div className="font-medium text-gray-900">{entry.page_title || 'Untitled'}</div>
-                        <div className="text-xs text-gray-500 break-all">{entry.page_url}</div>
+                        <div className="text-xs text-gray-500 break-all">{entry.url}</div>
                       </td>
                       <td className="p-2">
                         {isEditing ? (
                           <input
-                            value={editKeyword}
-                            onChange={(e) => setEditKeyword(e.target.value)}
+                            value={editKeywords}
+                            onChange={(e) => setEditKeywords(e.target.value)}
                             className="w-full px-2 py-1 border border-gray-300 rounded"
                           />
                         ) : (
-                          <span className="text-gray-900">{entry.keyword}</span>
-                        )}
-                      </td>
-                      <td className="p-2">
-                        {isEditing ? (
-                          <select
-                            value={editKeywordRole}
-                            onChange={(e) => setEditKeywordRole(e.target.value as 'selection' | 'seo')}
-                            className="w-full px-2 py-1 border border-gray-300 rounded"
-                          >
-                            <option value="selection">selection</option>
-                            <option value="seo">seo</option>
-                          </select>
-                        ) : (
-                          <span className={`text-xs px-2 py-1 rounded ${
-                            entry.keyword_role === 'selection' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-700'
-                          }`}>
-                            {entry.keyword_role}
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-2">
-                        {isEditing ? (
-                          <div className="space-y-2">
-                            <select
-                              value={editPeriodType}
-                              onChange={(e) => setEditPeriodType(e.target.value as PeriodType)}
-                              className="w-full px-2 py-1 border border-gray-300 rounded"
-                            >
-                              <option value="always">always</option>
-                              <option value="month">month</option>
-                              <option value="season">season</option>
-                            </select>
-                            {editPeriodType !== 'always' && (
-                              <input
-                                value={editPeriodValue}
-                                onChange={(e) => setEditPeriodValue(e.target.value)}
-                                placeholder={editPeriodType === 'month' ? 'e.g. march' : 'e.g. spring'}
-                                className="w-full px-2 py-1 border border-gray-300 rounded"
-                              />
-                            )}
-                          </div>
-                        ) : (
-                          <span>
-                            {entry.period_type}
-                            {entry.period_value ? `: ${entry.period_value}` : ''}
-                          </span>
+                          <span className="text-gray-900">{entry.keywords}</span>
                         )}
                       </td>
                       <td className="p-2">
                         {isEditing ? (
                           <div className="flex gap-2">
-                            <Button size="sm" onClick={() => saveEdit(entry.id)} disabled={saving}>
+                            <Button size="sm" onClick={() => void saveEdit(entry.url)} disabled={saving}>
                               Save
                             </Button>
                             <Button size="sm" variant="secondary" onClick={cancelEdit} disabled={saving}>
@@ -408,7 +330,7 @@ export default function Keywords() {
                             <Button size="sm" variant="secondary" onClick={() => startEdit(entry)}>
                               Edit
                             </Button>
-                            <Button size="sm" variant="danger" onClick={() => removeEntry(entry.id)}>
+                            <Button size="sm" variant="danger" onClick={() => void removeEntry(entry.url)}>
                               Delete
                             </Button>
                           </div>
@@ -419,8 +341,12 @@ export default function Keywords() {
                 })}
                 {entries.length === 0 && (
                   <tr>
-                    <td colSpan={5} className="p-6 text-center text-gray-500">
-                      {loadingEntries ? 'Loading keyword entries...' : 'No keyword entries found.'}
+                    <td colSpan={3} className="p-6 text-center text-gray-500">
+                      {loadingEntries
+                        ? 'Loading keyword entries...'
+                        : activeWebsiteId
+                          ? 'No keyword entries found for this website.'
+                          : 'No website selected.'}
                     </td>
                   </tr>
                 )}

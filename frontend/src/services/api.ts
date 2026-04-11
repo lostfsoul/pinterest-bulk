@@ -37,6 +37,7 @@ export interface Template {
   id: number;
   name: string;
   filename: string;
+  template_manifest?: Record<string, unknown> | null;
   width: number;
   height: number;
   created_at: string;
@@ -53,35 +54,28 @@ export interface TemplateZone {
   props: Record<string, unknown> | null;
 }
 
+export interface TemplateManifestUpdatePayload {
+  svg_content: string;
+  template_manifest: Record<string, unknown>;
+}
+
+export interface TemplateDetectionStartResponse {
+  template_id: number;
+  structure: Record<string, unknown>;
+  candidate_crops: Record<string, string>;
+}
+
+export interface TemplateOCRResult {
+  candidate_id: string;
+  text: string;
+  confidence: number;
+}
+
 export interface SitemapGroup {
   sitemap_url: string;
   label: string;
   bucket: string;
   is_default: boolean;
-}
-
-export interface WebsiteOverview {
-  id: number;
-  name: string;
-  url: string;
-  enabled_pages: number;
-  scraped_pages: number;
-  generated_pages: number;
-  scheduled_pins: number;
-  scheduled_until: string | null;
-  total_pins: number;
-  status: 'scheduled' | 'generated' | 'indexed' | 'paused';
-}
-
-export interface Board {
-  id: number;
-  website_id: number;
-  name: string;
-  source_type: 'manual' | 'ai';
-  keywords: string | null;
-  source_page_ids: number[] | null;
-  priority: number;
-  created_at: string;
 }
 
 export interface PageImage {
@@ -161,6 +155,12 @@ export interface PinDraft {
   updated_at: string;
 }
 
+export interface PinDetail {
+  pin: PinDraft;
+  page: Page;
+  images: PageImage[];
+}
+
 export interface PinRenderSettings {
   text_zone_y?: number;
   text_zone_height?: number;
@@ -210,30 +210,12 @@ export interface ScheduleSettings {
   start_hour: number;
   end_hour: number;
   min_days_reuse: number;
+  timezone: string;
   random_minutes: boolean;
   warmup_month: boolean;
   floating_days: boolean;
   max_floating_minutes: number;
   updated_at: string;
-}
-
-export interface AnalyticsSummary {
-  websites: number;
-  pages: number;
-  enabled_pages: number;
-  keywords: number;
-  pages_with_keywords: number;
-  templates: number;
-  images_total: number;
-  images_excluded: number;
-  images_available: number;
-  pins_total: number;
-  pins_draft: number;
-  pins_ready: number;
-  pins_exported: number;
-  pins_skipped: number;
-  exports_count: number;
-  exports_pins_total: number;
 }
 
 export interface AuthStatus {
@@ -265,16 +247,8 @@ export interface AISettings {
 }
 
 export interface KeywordEntry {
-  id: number;
-  page_id: number;
-  website_id: number;
-  website_name: string;
-  page_title: string | null;
-  page_url: string;
-  keyword: string;
-  keyword_role: 'selection' | 'seo';
-  period_type: 'always' | 'month' | 'season';
-  period_value: string | null;
+  url: string;
+  keywords: string;
 }
 
 export interface AIModelInfo {
@@ -353,18 +327,13 @@ export const apiClient = {
     pages_with_keywords: number;
     total_keywords: number;
     coverage_percent: number;
-    by_period_type: Record<string, number>;
-    by_role?: Record<string, number>;
   }>('/keywords'),
-  listKeywordEntries: (params?: { website_id?: number; period_type?: 'always' | 'month' | 'season'; keyword_role?: 'selection' | 'seo'; search?: string; limit?: number }) =>
+  listKeywordEntries: (params: { website_id: number; limit?: number }) =>
     api.get<KeywordEntry[]>('/keywords/entries', { params }),
-  updateKeywordEntry: (id: number, data: {
-    keyword: string;
-    keyword_role?: 'selection' | 'seo';
-    period_type: 'always' | 'month' | 'season';
-    period_value?: string | null;
-  }) => api.patch<KeywordEntry>(`/keywords/entries/${id}`, data),
-  deleteKeywordEntry: (id: number) => api.delete(`/keywords/entries/${id}`),
+  updateKeywordEntry: (data: { url: string; keywords: string }) =>
+    api.patch<KeywordEntry>('/keywords/entries', data),
+  deleteKeywordEntry: (url: string) =>
+    api.delete('/keywords/entries', { params: { url } }),
 
   // Templates
   listTemplates: () => api.get<Template[]>('/templates'),
@@ -376,6 +345,13 @@ export const apiClient = {
     return api.post<Template>('/templates/upload', formData);
   },
   getTemplate: (id: number) => api.get<Template>(`/templates/${id}`),
+  getTemplateSvg: (id: number) => api.get<string>(`/templates/${id}/file`, { responseType: 'text' as const }),
+  startTemplateDetection: (templateId: number, max_regions = 10) =>
+    api.post<TemplateDetectionStartResponse>(`/templates/${templateId}/detect/start`, { max_regions }),
+  finalizeTemplateDetection: (templateId: number, ocr_results: TemplateOCRResult[]) =>
+    api.post<Template>(`/templates/${templateId}/detect/finalize`, { ocr_results }),
+  updateTemplateManifest: (templateId: number, payload: TemplateManifestUpdatePayload) =>
+    api.put<Template>(`/templates/${templateId}/manifest`, payload),
   addZone: (templateId: number, zone: {
     zone_type: 'text' | 'image';
     x: number;
@@ -400,9 +376,12 @@ export const apiClient = {
     return api.patch<TemplateZone>(`/templates/${templateId}/zones/${zoneId}`, formData);
   },
   listTemplateFonts: () => api.get<{ fonts: Array<{ filename: string; family: string }> }>('/templates/fonts/list'),
-  uploadTemplateFont: (file: File) => {
+  uploadTemplateFont: (file: File, family?: string) => {
     const formData = new FormData();
     formData.append('file', file);
+    if (family && family.trim()) {
+      formData.append('family', family.trim());
+    }
     return api.post<{ filename: string; family: string }>('/templates/fonts/upload', formData);
   },
   deleteZone: (templateId: number, zoneId: number) => api.delete(`/templates/${templateId}/zones/${zoneId}`),
@@ -445,6 +424,11 @@ export const apiClient = {
     description_max?: number;
     mode?: 'conservative' | 'matrix';
     variation_options?: Record<string, number | boolean>;
+    top_n?: number;
+    similarity_threshold?: number;
+    diversity_enabled?: boolean;
+    diversity_penalty?: number;
+    semantic_enabled?: boolean;
     render_settings?: PinRenderSettings;
     use_ai_titles?: boolean;
   }) =>
@@ -464,6 +448,11 @@ export const apiClient = {
     description_max?: number;
     mode?: 'conservative' | 'matrix';
     variation_options?: Record<string, number | boolean>;
+    top_n?: number;
+    similarity_threshold?: number;
+    diversity_enabled?: boolean;
+    diversity_penalty?: number;
+    semantic_enabled?: boolean;
     render_settings?: PinRenderSettings;
     use_ai_titles?: boolean;
   }) => api.post<GenerationJob>('/pins/generate-job', data),
@@ -474,10 +463,16 @@ export const apiClient = {
     website_id?: number;
     mode?: 'conservative' | 'matrix';
     variation_options?: Record<string, number | boolean>;
+    top_n?: number;
+    similarity_threshold?: number;
+    diversity_enabled?: boolean;
+    diversity_penalty?: number;
+    semantic_enabled?: boolean;
   }) => api.post<GenerationPreview>('/pins/preview', data),
-  listPins: (params?: { status?: string; is_selected?: boolean }) =>
+  listPins: (params?: { status?: string; is_selected?: boolean; website_id?: number }) =>
     api.get<PinDraft[]>('/pins', { params }),
   getPin: (id: number) => api.get<PinDraft>(`/pins/${id}`),
+  getPinDetail: (id: number) => api.get<PinDetail>(`/pins/${id}/detail`),
   updatePin: (id: number, data: {
     title?: string;
     description?: string;
@@ -511,6 +506,7 @@ export const apiClient = {
     start_hour: number;
     end_hour: number;
     min_days_reuse: number;
+    timezone: string;
     random_minutes: boolean;
     warmup_month: boolean;
     floating_days: boolean;
@@ -568,19 +564,6 @@ export const apiClient = {
   getPlaceholderInfo: () => api.get<PlaceholderInfo>('/ai-presets/placeholders'),
   listAIModels: () => api.get<{ models: AIModelInfo[] }>('/ai-presets/models'),
 
-  // Boards
-  listBoards: (website_id: number) => api.get<Board[]>('/boards', { params: { website_id } }),
-  createBoard: (data: { website_id: number; name: string; source_type?: 'manual' | 'ai'; keywords?: string; source_page_ids?: number[] | null; priority?: number }) =>
-    api.post<Board>('/boards', data),
-  updateBoard: (id: number, data: { name?: string; keywords?: string; source_page_ids?: number[] | null; priority?: number }) =>
-    api.patch<Board>(`/boards/${id}`, data),
-  deleteBoard: (id: number) => api.delete(`/boards/${id}`),
-  suggestBoards: (data: { website_id: number; count?: number; page_ids?: number[] }) =>
-    api.post<{ website_id: number; page_ids_used: number[]; suggestions: string[] }>('/boards/suggest', data),
-
-  // Analytics
-  getAnalyticsSummary: () => api.get<AnalyticsSummary>('/analytics/summary'),
-  getWebsitesOverview: () => api.get<WebsiteOverview[]>('/analytics/websites-overview'),
 };
 
 export default apiClient;

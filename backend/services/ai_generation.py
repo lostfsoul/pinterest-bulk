@@ -19,6 +19,7 @@ AVAILABLE_PLACEHOLDERS = [
     {"name": "url", "description": "Full page URL"},
     {"name": "website_name", "description": "Website name"},
     {"name": "section", "description": "Page section/category"},
+    {"name": "board_list", "description": "Comma-separated list of allowed board names"},
 ]
 
 LANGUAGE_OPTIONS = [
@@ -87,6 +88,14 @@ def substitute_placeholders(
         except Exception:
             website_name = ""
 
+    board_list_raw = context.get("board_list", context.get("board_options", []))
+    if isinstance(board_list_raw, list):
+        board_list_items = [clean_whitespace(str(item)) for item in board_list_raw]
+    else:
+        board_list_items = [clean_whitespace(str(board_list_raw))]
+    board_list_items = [item for item in board_list_items if item]
+    board_list_str = ", ".join(board_list_items)
+
     substitutions = {
         "title": clean_whitespace(context.get("title")) or "",
         "description": clean_whitespace(context.get("description")) or "",
@@ -94,6 +103,10 @@ def substitute_placeholders(
         "url": context.get("url", ""),
         "website_name": website_name,
         "section": clean_whitespace(context.get("section")) or "",
+        "board list": board_list_str,
+        "board_list": board_list_str,
+        # Backward compatibility for existing prompts using {{ board_options }}.
+        "board_options": board_list_str,
     }
 
     for placeholder, value in substitutions.items():
@@ -297,6 +310,7 @@ def generate_board_name(
     url: str = "",
     section: str = "",
     description: str = "",
+    board_list: list[str] | None = None,
 ) -> str | None:
     """Generate a board name using AI preset or fallback."""
     context = {
@@ -306,6 +320,7 @@ def generate_board_name(
         "url": url,
         "section": section,
         "description": description,
+        "board_list": board_list or [],
     }
 
     if preset:

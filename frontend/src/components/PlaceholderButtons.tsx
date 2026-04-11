@@ -17,6 +17,7 @@ export function PlaceholderButtons({ onInsert, placeholders }: PlaceholderButton
       { name: 'url', description: 'Full page URL' },
       { name: 'website_name', description: 'Website name' },
       { name: 'section', description: 'Page section/category' },
+      { name: 'board_list', description: 'Comma-separated list of allowed board names' },
     ];
   }
 

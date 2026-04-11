@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import apiClient, { Board, GenerationJob, GenerationPreview, GlobalExcludedImage, ImagePageSummary, PageImage, PinDraft, Template, Website } from '../services/api';
+import apiClient, { GenerationJob, GenerationPreview, GlobalExcludedImage, ImagePageSummary, PageImage, PinDetail, PinDraft, Template, Website } from '../services/api';
 import { Button } from '../components/Button';
 import { PinPreview } from '../components/PinPreview';
 import { EditablePalette, normalizeHexColor, sampleImagePalette } from '../utils/palette';
 
 const UNKNOWN_SITEMAP_KEY = '__unknown_sitemap__';
 
-type Step = 1 | 2 | 3 | 4 | 5;
+type Step = 1 | 2 | 3 | 4;
 type Orientation = 'portrait' | 'square' | 'landscape';
 type PreviewTab = 'pins' | 'images' | 'selected';
 type SelectedImageFilter = 'all' | 'included' | 'excluded' | 'featured' | 'article' | 'other';
@@ -14,6 +14,13 @@ type GlobalRuleReason = 'affiliate' | 'logo' | 'tracking' | 'icon' | 'ad' | 'oth
 type PageGroupingMode = 'prefix' | 'sitemap' | 'categories';
 type CategoryViewMode = 'post_categories' | 'taxonomy_pages';
 type PageKeywordFilter = 'all' | 'with_keywords';
+type GenerateMode = 'onboarding' | 'calendar';
+
+type CalendarDayGroup = {
+  key: string;
+  label: string;
+  pins: PinDraft[];
+};
 
 type WorkflowSettings = {
   preview_page_id: number | null;
@@ -28,6 +35,7 @@ type WorkflowSettings = {
     language: string;
     title_max: number;
     description_max: number;
+    board_candidates: string[];
   };
   design: {
     template_ids: number[];
@@ -55,6 +63,7 @@ type WorkflowSettings = {
     floating_days: boolean;
     randomize_posting_times: boolean;
     max_floating_minutes: number;
+    advanced_scheduling: boolean;
     timezone: string;
     start_hour: number;
     end_hour: number;
@@ -66,6 +75,14 @@ type WorkflowSettings = {
     monthly_limit_enabled: boolean;
     monthly_limit_count: number;
     no_link_pins: boolean;
+  };
+  trend: {
+    enabled: boolean;
+    top_n: number;
+    similarity_threshold: number;
+    diversity_enabled: boolean;
+    diversity_penalty: number;
+    semantic_enabled: boolean;
   };
 };
 
@@ -91,10 +108,11 @@ const DEFAULT_SETTINGS: WorkflowSettings = {
     language: 'English',
     title_max: 100,
     description_max: 500,
+    board_candidates: [],
   },
   design: {
     template_ids: [],
-    font_choices: ['Bebas Neue'],
+    font_choices: ['Poppins'],
     palette_mode: 'auto',
     brand_palette: {
       background: '#ffffff',
@@ -126,6 +144,7 @@ const DEFAULT_SETTINGS: WorkflowSettings = {
     floating_days: true,
     randomize_posting_times: true,
     max_floating_minutes: 45,
+    advanced_scheduling: false,
     timezone: 'UTC',
     start_hour: 8,
     end_hour: 20,
@@ -138,6 +157,14 @@ const DEFAULT_SETTINGS: WorkflowSettings = {
     monthly_limit_count: 0,
     no_link_pins: false,
   },
+  trend: {
+    enabled: true,
+    top_n: 0,
+    similarity_threshold: 0,
+    diversity_enabled: false,
+    diversity_penalty: 0.15,
+    semantic_enabled: false,
+  },
 };
 
 const IDLE_PROGRESS: GenerationProgress = {
@@ -148,6 +175,46 @@ const IDLE_PROGRESS: GenerationProgress = {
   percent: 0,
 };
 
+const COMMON_TIMEZONES = [
+  'UTC',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'Europe/London',
+  'Europe/Paris',
+  'Africa/Casablanca',
+  'Asia/Dubai',
+  'Asia/Kolkata',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Australia/Sydney',
+];
+
+function normalizeDayKey(value: string | null): string {
+  if (!value) return 'unscheduled';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'unscheduled';
+  return parsed.toISOString().slice(0, 10);
+}
+
+function formatCalendarDayLabel(key: string): string {
+  if (key === 'unscheduled') return 'Unscheduled';
+  const parsed = new Date(`${key}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return key;
+  return parsed.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function sortCalendarGroups(a: CalendarDayGroup, b: CalendarDayGroup): number {
+  if (a.key === 'unscheduled') return 1;
+  if (b.key === 'unscheduled') return -1;
+  return a.key.localeCompare(b.key);
+}
+
 function parseSettings(raw: unknown): WorkflowSettings {
   if (!raw || typeof raw !== 'object') return DEFAULT_SETTINGS;
   const source = raw as Record<string, unknown>;
@@ -156,6 +223,7 @@ function parseSettings(raw: unknown): WorkflowSettings {
   const image = (source.image && typeof source.image === 'object' ? source.image : source.image_settings && typeof source.image_settings === 'object' ? source.image_settings : {}) as Record<string, unknown>;
   const generation = (source.generation && typeof source.generation === 'object' ? source.generation : {}) as Record<string, unknown>;
   const content = (source.content && typeof source.content === 'object' ? source.content : source.content_settings && typeof source.content_settings === 'object' ? source.content_settings : {}) as Record<string, unknown>;
+  const trend = (source.trend && typeof source.trend === 'object' ? source.trend : {}) as Record<string, unknown>;
 
   const templateIds = Array.isArray(design.template_ids)
     ? design.template_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
@@ -181,6 +249,9 @@ function parseSettings(raw: unknown): WorkflowSettings {
       language: String(ai.language ?? DEFAULT_SETTINGS.ai.language),
       title_max: Number(ai.title_max ?? DEFAULT_SETTINGS.ai.title_max),
       description_max: Number(ai.description_max ?? DEFAULT_SETTINGS.ai.description_max),
+      board_candidates: Array.isArray(ai.board_candidates)
+        ? ai.board_candidates.map((value) => String(value).trim()).filter((value) => value.length > 0)
+        : DEFAULT_SETTINGS.ai.board_candidates,
     },
     design: {
       ...DEFAULT_SETTINGS.design,
@@ -219,6 +290,7 @@ function parseSettings(raw: unknown): WorkflowSettings {
       floating_days: Boolean(generation.floating_days ?? DEFAULT_SETTINGS.generation.floating_days),
       randomize_posting_times: Boolean(generation.randomize_posting_times ?? DEFAULT_SETTINGS.generation.randomize_posting_times),
       max_floating_minutes: Number(generation.max_floating_minutes ?? DEFAULT_SETTINGS.generation.max_floating_minutes),
+      advanced_scheduling: Boolean(generation.advanced_scheduling ?? DEFAULT_SETTINGS.generation.advanced_scheduling),
       timezone: String(generation.timezone ?? DEFAULT_SETTINGS.generation.timezone),
       start_hour: Number(generation.start_hour ?? DEFAULT_SETTINGS.generation.start_hour),
       end_hour: Number(generation.end_hour ?? DEFAULT_SETTINGS.generation.end_hour),
@@ -231,6 +303,15 @@ function parseSettings(raw: unknown): WorkflowSettings {
       monthly_limit_enabled: Boolean(content.monthly_limit_enabled ?? DEFAULT_SETTINGS.content.monthly_limit_enabled),
       monthly_limit_count: Number(content.monthly_limit_count ?? DEFAULT_SETTINGS.content.monthly_limit_count),
       no_link_pins: Boolean(content.no_link_pins ?? DEFAULT_SETTINGS.content.no_link_pins),
+    },
+    trend: {
+      ...DEFAULT_SETTINGS.trend,
+      enabled: Boolean(trend.enabled ?? DEFAULT_SETTINGS.trend.enabled),
+      top_n: Number(trend.top_n ?? DEFAULT_SETTINGS.trend.top_n),
+      similarity_threshold: Number(trend.similarity_threshold ?? DEFAULT_SETTINGS.trend.similarity_threshold),
+      diversity_enabled: Boolean(trend.diversity_enabled ?? DEFAULT_SETTINGS.trend.diversity_enabled),
+      diversity_penalty: Number(trend.diversity_penalty ?? DEFAULT_SETTINGS.trend.diversity_penalty),
+      semantic_enabled: Boolean(trend.semantic_enabled ?? DEFAULT_SETTINGS.trend.semantic_enabled),
     },
   };
 }
@@ -343,12 +424,6 @@ function normalizeEditablePalette(palette: EditablePalette | null | undefined): 
   };
 }
 
-function boardMatchesSelectedPages(board: Board, selectedPageIds: Set<number>): boolean {
-  const sourcePageIds = Array.isArray(board.source_page_ids) ? board.source_page_ids : [];
-  if (sourcePageIds.length === 0) return false;
-  return sourcePageIds.some((pageId) => selectedPageIds.has(pageId));
-}
-
 export default function Generate() {
   const [step, setStep] = useState<Step>(1);
   const [loading, setLoading] = useState(true);
@@ -360,10 +435,15 @@ export default function Generate() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [templateFonts, setTemplateFonts] = useState<Array<{ filename: string; family: string }>>([]);
   const [pages, setPages] = useState<ImagePageSummary[]>([]);
-  const [boards, setBoards] = useState<Board[]>([]);
   const [pins, setPins] = useState<PinDraft[]>([]);
+  const [websitePins, setWebsitePins] = useState<PinDraft[]>([]);
   const [previewResult, setPreviewResult] = useState<GenerationPreview | null>(null);
   const [activeWebsiteId, setActiveWebsiteId] = useState<number | null>(null);
+  const [mode, setMode] = useState<GenerateMode>('onboarding');
+  const [selectedCalendarPinId, setSelectedCalendarPinId] = useState<number | null>(null);
+  const [calendarPinDetail, setCalendarPinDetail] = useState<PinDetail | null>(null);
+  const [calendarDetailLoading, setCalendarDetailLoading] = useState(false);
+  const [calendarPinMutationId, setCalendarPinMutationId] = useState<number | null>(null);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<number>>(new Set());
   const [settings, setSettings] = useState<WorkflowSettings>(DEFAULT_SETTINGS);
   const [previewTab, setPreviewTab] = useState<PreviewTab>('pins');
@@ -372,9 +452,6 @@ export default function Generate() {
   const [pageGroupingMode, setPageGroupingMode] = useState<PageGroupingMode>('prefix');
   const [categoryViewMode, setCategoryViewMode] = useState<CategoryViewMode>('post_categories');
   const [collapsedPageGroups, setCollapsedPageGroups] = useState<Set<string>>(new Set());
-  const [newBoardName, setNewBoardName] = useState('');
-  const [boardSuggestCount, setBoardSuggestCount] = useState(5);
-  const [replaceAiBoardsOnSuggest, setReplaceAiBoardsOnSuggest] = useState(true);
   const [allPageImages, setAllPageImages] = useState<Map<number, PageImage[]>>(new Map());
   const [autoScrapedPreviewPages, setAutoScrapedPreviewPages] = useState<Set<number>>(new Set());
   const [selectedImageFilter, setSelectedImageFilter] = useState<SelectedImageFilter>('all');
@@ -385,7 +462,7 @@ export default function Generate() {
     textZonePadLeft: 0,
     textZonePadRight: 0,
     textZoneBgColor: '#ffffff',
-    fontFamily: '"Bebas Neue", Impact, sans-serif',
+    fontFamily: '"Poppins", "Segoe UI", Arial, sans-serif',
     textColor: '#000000',
     textAlign: 'left' as 'left' | 'center',
     textEffect: 'none' as 'none' | 'drop' | 'echo' | 'outline',
@@ -415,6 +492,8 @@ export default function Generate() {
       const custom = event as CustomEvent<number>;
       setActiveWebsiteId(custom.detail ?? null);
       setStep(1);
+      setSelectedCalendarPinId(null);
+      setCalendarPinDetail(null);
     };
     window.addEventListener('website-switch', onSwitch as EventListener);
     return () => window.removeEventListener('website-switch', onSwitch as EventListener);
@@ -453,12 +532,14 @@ export default function Generate() {
           window.clearInterval(interval);
           setGenerating(false);
           setGenerationJobId(null);
-          const pinsRes = await apiClient.listPins();
+          if (activeWebsiteId) {
+            await refreshWebsitePins(activeWebsiteId);
+          }
           if (cancelled) return;
-          setPins(pinsRes.data);
+          setMode('calendar');
           setStep5Status({
             type: 'success',
-            message: job.message || `Generated ${job.total_pins} pins. Review and export CSV from this onboarding flow.`,
+            message: job.message || `Generated ${job.total_pins} pins. You can now review them in calendar mode.`,
           });
         } else if (job.status === 'failed') {
           window.clearInterval(interval);
@@ -479,7 +560,7 @@ export default function Generate() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [generationJobId]);
+  }, [generationJobId, activeWebsiteId]);
 
   const filteredPages = useMemo(() => {
     const term = pageSearch.trim().toLowerCase();
@@ -523,29 +604,68 @@ export default function Generate() {
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [filteredPages, pageGroupingMode, categoryViewMode]);
 
+  const timezoneOptions = useMemo(() => {
+    const intlWithSupportedValues = Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] };
+    const supported = typeof intlWithSupportedValues.supportedValuesOf === 'function'
+      ? intlWithSupportedValues.supportedValuesOf('timeZone')
+      : [];
+    const merged = [...COMMON_TIMEZONES, settings.generation.timezone, ...supported];
+    return Array.from(new Set(merged.map((value) => value.trim()).filter(Boolean)));
+  }, [settings.generation.timezone]);
+
   const canStep2 = Boolean(previewPage && settings.design.template_ids.length > 0);
   const canStep3 = canStep2;
   const canStep4 = Boolean(activeWebsiteId) && selectedPageIds.size > 0;
-  const visibleBoards = useMemo(
-    () => boards.filter((board) => boardMatchesSelectedPages(board, selectedPageIds)),
-    [boards, selectedPageIds],
+
+  const calendarDayGroups = useMemo(() => {
+    const byDay = new Map<string, PinDraft[]>();
+    for (const pin of websitePins) {
+      const key = normalizeDayKey(pin.publish_date);
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key)?.push(pin);
+    }
+    return Array.from(byDay.entries())
+      .map(([key, dayPins]) => ({
+        key,
+        label: formatCalendarDayLabel(key),
+        pins: [...dayPins].sort((a, b) => {
+          const aTime = a.publish_date ? new Date(a.publish_date).getTime() : 0;
+          const bTime = b.publish_date ? new Date(b.publish_date).getTime() : 0;
+          if (aTime !== bTime) return aTime - bTime;
+          return b.id - a.id;
+        }),
+      }))
+      .sort(sortCalendarGroups);
+  }, [websitePins]);
+
+  const approvedPinsCount = useMemo(
+    () => websitePins.filter((pin) => pin.is_selected && pin.status !== 'skipped').length,
+    [websitePins],
   );
-  const canStep5 = Boolean(activeWebsiteId) && canStep4 && visibleBoards.length > 0;
+  const selectedForExportCount = useMemo(
+    () => websitePins.filter((pin) => pin.is_selected).length,
+    [websitePins],
+  );
+
+  async function refreshWebsitePins(websiteId: number): Promise<PinDraft[]> {
+    const response = await apiClient.listPins({ website_id: websiteId });
+    setWebsitePins(response.data);
+    setPins(response.data);
+    return response.data;
+  }
 
   async function loadInitial() {
     setLoading(true);
     try {
       const stored = localStorage.getItem('active_website_id');
       const storedId = stored ? Number(stored) : null;
-      const [websitesRes, templatesRes, pinsRes, fontsRes] = await Promise.all([
+      const [websitesRes, templatesRes, fontsRes] = await Promise.all([
         apiClient.listWebsites(),
         apiClient.listTemplates(),
-        apiClient.listPins(),
         apiClient.listTemplateFonts(),
       ]);
       setWebsites(websitesRes.data);
       setTemplates(templatesRes.data);
-      setPins(pinsRes.data);
       setTemplateFonts(fontsRes.data.fonts || []);
       if (websitesRes.data.length > 0) {
         const preferredId =
@@ -562,26 +682,31 @@ export default function Generate() {
   async function loadWebsiteContext(websiteId: number) {
     const seq = ++websiteLoadSeqRef.current;
     setLoading(true);
+    setMode('onboarding');
     setPages([]);
-    setBoards([]);
     setSelectedPageIds(new Set());
     setPreviewResult(null);
+    setWebsitePins([]);
     setAllPageImages(new Map());
     setStep5Status({ type: 'idle', message: '' });
     setGenerationProgress(IDLE_PROGRESS);
     setGenerationJobId(null);
+    setSelectedCalendarPinId(null);
+    setCalendarPinDetail(null);
     try {
-      const [pagesRes, settingsRes, boardsRes, rulesRes] = await Promise.all([
+      const [pagesRes, settingsRes, rulesRes, pinsRes] = await Promise.all([
         apiClient.listImagePages({ website_id: websiteId }),
         apiClient.getWebsiteGenerationSettings(websiteId),
-        apiClient.listBoards(websiteId),
         apiClient.listGlobalExclusions(),
+        apiClient.listPins({ website_id: websiteId }),
       ]);
       if (seq !== websiteLoadSeqRef.current) return;
       setPages(pagesRes.data);
       setSelectedPageIds(new Set());
-      setBoards(boardsRes.data);
       setGlobalRules(rulesRes.data);
+      setWebsitePins(pinsRes.data);
+      setPins(pinsRes.data);
+      setMode(pinsRes.data.length > 0 ? 'calendar' : 'onboarding');
       const parsed = parseSettings(settingsRes.data.settings);
       if (!parsed.preview_page_id && pagesRes.data.length > 0) {
         const preferred =
@@ -679,7 +804,8 @@ export default function Generate() {
         pins_per_day: settings.generation.daily_pin_count,
         start_hour: settings.generation.start_hour,
         end_hour: settings.generation.end_hour,
-        min_days_reuse: Math.max(31, settings.content.desired_gap_days),
+        min_days_reuse: Math.max(0, settings.content.desired_gap_days),
+        timezone: settings.generation.timezone || 'UTC',
         random_minutes: settings.generation.randomize_posting_times,
         warmup_month: settings.generation.warmup_month,
         floating_days: settings.generation.floating_days,
@@ -690,64 +816,6 @@ export default function Generate() {
       alert('Failed to save settings');
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function suggestBoards() {
-    if (!activeWebsiteId) {
-      setStep5Status({ type: 'error', message: 'No active website selected.' });
-      return;
-    }
-    try {
-      const currentSelectedIds = Array.from(selectedPageIds);
-      const response = await apiClient.suggestBoards({
-        website_id: activeWebsiteId,
-        count: boardSuggestCount,
-        page_ids: currentSelectedIds,
-      });
-      if (replaceAiBoardsOnSuggest) {
-        const existingAiBoards = boards.filter((board) => board.source_type === 'ai' && boardMatchesSelectedPages(board, selectedPageIds));
-        await Promise.allSettled(existingAiBoards.map((board) => apiClient.deleteBoard(board.id)));
-      }
-      const existingNow = await apiClient.listBoards(activeWebsiteId);
-      const existingNames = new Set(existingNow.data.map((board) => board.name.toLowerCase()));
-      for (const name of response.data.suggestions) {
-        if (!existingNames.has(name.toLowerCase())) {
-          await apiClient.createBoard({
-            website_id: activeWebsiteId,
-            name,
-            source_type: 'ai',
-            source_page_ids: response.data.page_ids_used,
-          });
-          existingNames.add(name.toLowerCase());
-        }
-      }
-      const refresh = await apiClient.listBoards(activeWebsiteId);
-      setBoards(refresh.data);
-    } catch (error) {
-      const message = (error as { response?: { data?: { detail?: string } }; message?: string })?.response?.data?.detail || (error as Error)?.message || 'Board generation failed';
-      setStep5Status({ type: 'error', message });
-    }
-  }
-
-  async function addBoard() {
-    if (!activeWebsiteId || !newBoardName.trim()) return;
-    await apiClient.createBoard({
-      website_id: activeWebsiteId,
-      name: newBoardName.trim(),
-      source_type: 'manual',
-      source_page_ids: Array.from(selectedPageIds),
-    });
-    setNewBoardName('');
-    const refresh = await apiClient.listBoards(activeWebsiteId);
-    setBoards(refresh.data);
-  }
-
-  async function removeBoard(id: number) {
-    await apiClient.deleteBoard(id);
-    if (activeWebsiteId) {
-      const refresh = await apiClient.listBoards(activeWebsiteId);
-      setBoards(refresh.data);
     }
   }
 
@@ -777,7 +845,7 @@ export default function Generate() {
         },
       });
       setPreviewResult(response.data);
-      setStep(5);
+      setStep(4);
       setStep5Status({
         type: 'success',
         message: `Preview ready: ${response.data.estimated_pins} projected pins from ${response.data.pages_count} pages.`,
@@ -796,8 +864,8 @@ export default function Generate() {
       setStep5Status({ type: 'error', message: 'No active website selected.' });
       return;
     }
-    if (!canStep5) {
-      setStep5Status({ type: 'error', message: 'Generation is not ready yet. Ensure pages and at least one board are selected.' });
+    if (!canStep4) {
+      setStep5Status({ type: 'error', message: 'Generation is not ready yet. Ensure pages are selected.' });
       return;
     }
     setGenerating(true);
@@ -813,11 +881,12 @@ export default function Generate() {
     try {
       const selectedIds = Array.from(selectedPageIds);
       await ensureSelectedPagesEnabled(selectedIds);
+      const defaultBoard = settings.ai.board_candidates[0] || 'General';
       const response = await apiClient.startGenerationJob({
         website_id: activeWebsiteId,
         template_id: settings.design.template_ids[0],
         page_ids: selectedIds,
-        board_name: visibleBoards[0]?.name || 'General',
+        board_name: defaultBoard,
         use_ai_titles: settings.ai.generate_titles,
         generate_descriptions: settings.ai.generate_descriptions,
         tone: settings.ai.tone,
@@ -877,18 +946,102 @@ export default function Generate() {
     }
   }
 
+  async function openCalendarPinDetail(pinId: number) {
+    setSelectedCalendarPinId(pinId);
+    setCalendarDetailLoading(true);
+    try {
+      const response = await apiClient.getPinDetail(pinId);
+      setCalendarPinDetail(response.data);
+    } catch (error) {
+      console.error('Failed to load pin detail:', error);
+      setCalendarPinDetail(null);
+    } finally {
+      setCalendarDetailLoading(false);
+    }
+  }
+
+  function closeCalendarPinDetail() {
+    setSelectedCalendarPinId(null);
+    setCalendarPinDetail(null);
+    setCalendarDetailLoading(false);
+  }
+
+  async function updateCalendarPinStatus(pin: PinDraft, approved: boolean) {
+    if (!activeWebsiteId) return;
+    setCalendarPinMutationId(pin.id);
+    try {
+      await apiClient.updatePin(pin.id, {
+        is_selected: approved,
+        status: approved ? 'ready' : 'skipped',
+      });
+      await refreshWebsitePins(activeWebsiteId);
+      if (selectedCalendarPinId === pin.id) {
+        await openCalendarPinDetail(pin.id);
+      }
+    } catch (error) {
+      console.error('Failed to update pin status:', error);
+      alert('Failed to update pin status');
+    } finally {
+      setCalendarPinMutationId(null);
+    }
+  }
+
+  async function approveAllCalendarPins() {
+    const candidates = websitePins.filter((pin) => !pin.is_selected || pin.status === 'skipped');
+    if (candidates.length === 0 || !activeWebsiteId) return;
+    setCalendarPinMutationId(-1);
+    try {
+      await Promise.all(
+        candidates.map((pin) =>
+          apiClient.updatePin(pin.id, { is_selected: true, status: 'ready' }),
+        ),
+      );
+      await refreshWebsitePins(activeWebsiteId);
+    } catch (error) {
+      console.error('Failed to approve all pins:', error);
+      alert('Failed to approve all pins');
+    } finally {
+      setCalendarPinMutationId(null);
+    }
+  }
+
+  async function rejectAllCalendarPins() {
+    if (websitePins.length === 0 || !activeWebsiteId) return;
+    setCalendarPinMutationId(-2);
+    try {
+      await Promise.all(
+        websitePins.map((pin) =>
+          apiClient.updatePin(pin.id, { is_selected: false, status: 'skipped' }),
+        ),
+      );
+      await refreshWebsitePins(activeWebsiteId);
+    } catch (error) {
+      console.error('Failed to reject all pins:', error);
+      alert('Failed to reject all pins');
+    } finally {
+      setCalendarPinMutationId(null);
+    }
+  }
+
+  function switchToOnboarding() {
+    setMode('onboarding');
+    setStep(1);
+    setStep5Status({ type: 'idle', message: '' });
+  }
+
   async function exportGeneratedCsv() {
-    if (pins.length === 0) {
-      setStep5Status({ type: 'error', message: 'No generated pins to export yet. Generate first.' });
+    const selectedIds = websitePins.filter((pin) => pin.is_selected).map((pin) => pin.id);
+    if (selectedIds.length === 0) {
+      setStep5Status({ type: 'error', message: 'No approved pins selected for export yet.' });
       return;
     }
     setExporting(true);
     try {
-      const response = await apiClient.exportCsv({ selected_only: false });
+      const response = await apiClient.exportCsv({ selected_only: true, pin_ids: selectedIds });
       window.open(response.data.download_url, '_blank');
       setStep5Status({
         type: 'success',
-        message: `CSV exported with ${response.data.pins_count} pins.`,
+        message: `CSV exported with ${response.data.pins_count} approved pins.`,
       });
     } catch (error) {
       const message =
@@ -945,7 +1098,6 @@ export default function Generate() {
     if (next === 2 && canStep2) return setStep(2);
     if (next === 3 && canStep3) return setStep(3);
     if (next === 4 && canStep4) return setStep(4);
-    if (next === 5 && canStep5) return setStep(5);
   }
 
   async function togglePage(id: number) {
@@ -1127,11 +1279,11 @@ export default function Generate() {
 
   const fontOptions = useMemo(() => {
     const options: Array<{ key: string; label: string; family: string; customFile: string | null }> = [
+      { key: 'builtin:poppins', label: 'Poppins', family: '"Poppins", "Segoe UI", Arial, sans-serif', customFile: null },
       { key: 'builtin:bebas', label: 'Bebas Neue', family: '"Bebas Neue", Impact, sans-serif', customFile: null },
       { key: 'builtin:montserrat', label: 'Montserrat', family: '"Montserrat", "Arial Black", sans-serif', customFile: null },
       { key: 'builtin:playfair', label: 'Playfair Display', family: '"Playfair Display", Georgia, serif', customFile: null },
       { key: 'builtin:oswald', label: 'Oswald', family: '"Oswald", Impact, sans-serif', customFile: null },
-      { key: 'builtin:poppins', label: 'Poppins', family: '"Poppins", Arial, sans-serif', customFile: null },
     ];
     for (const font of templateFonts) {
       const label = formatCustomFontLabel(font.family, font.filename);
@@ -1153,7 +1305,7 @@ export default function Generate() {
     const matchedBuiltin = fontOptions.find(
       (option) => option.customFile === null && option.family === previewStyle.fontFamily,
     );
-    return matchedBuiltin?.key || 'builtin:bebas';
+    return matchedBuiltin?.key || 'builtin:poppins';
   }, [fontOptions, previewStyle.customFontFile, previewStyle.fontFamily]);
 
   const previewPageImagesAll = previewPage ? allPageImages.get(previewPage.id) || [] : [];
@@ -1235,13 +1387,211 @@ export default function Generate() {
     return previewPageImagesAll.filter((img) => img.category === selectedImageFilter);
   })();
 
+  if (mode === 'calendar') {
+    const activeWebsite = websites.find((website) => website.id === activeWebsiteId) || null;
+
+    return (
+      <div className="space-y-4">
+        <div className="bg-white border-2 border-black p-4">
+          <div className="flex flex-wrap gap-2 items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-black uppercase">Publishing Calendar</h1>
+              <p className="text-xs text-gray-600">
+                {activeWebsite ? `Website: ${activeWebsite.name}` : 'No active website selected'}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={() => { setMode('onboarding'); setStep(3); }}>
+                Review Pages
+              </Button>
+              <Button variant="secondary" onClick={() => { setMode('onboarding'); setStep(2); }}>
+                Adjust Settings
+              </Button>
+              <Button onClick={switchToOnboarding}>Fill in gaps</Button>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white border-2 border-black p-3">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+            <div className="border border-black p-2">
+              <p className="text-xs uppercase text-gray-500">All</p>
+              <p className="font-black">{websitePins.length}</p>
+            </div>
+            <div className="border border-black p-2">
+              <p className="text-xs uppercase text-gray-500">Approved for export</p>
+              <p className="font-black">{approvedPinsCount}</p>
+            </div>
+            <div className="border border-black p-2">
+              <p className="text-xs uppercase text-gray-500">Selected</p>
+              <p className="font-black">{selectedForExportCount}</p>
+            </div>
+            <div className="border border-black p-2 flex items-center justify-end gap-2">
+              <Button size="sm" onClick={exportGeneratedCsv} disabled={exporting || selectedForExportCount === 0}>
+                {exporting ? 'Exporting...' : 'Export Approved'}
+              </Button>
+            </div>
+          </div>
+          {step5Status.type !== 'idle' && (
+            <div
+              className={`mt-3 text-sm border px-2 py-2 ${
+                step5Status.type === 'error'
+                  ? 'border-red-600 bg-red-50 text-red-800'
+                  : step5Status.type === 'success'
+                    ? 'border-green-700 bg-green-50 text-green-800'
+                    : 'border-black bg-bg-secondary text-black'
+              }`}
+            >
+              {step5Status.message}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            onClick={approveAllCalendarPins}
+            disabled={websitePins.length === 0 || calendarPinMutationId !== null}
+          >
+            {calendarPinMutationId === -1 ? 'Approving...' : 'Approve All'}
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={rejectAllCalendarPins}
+            disabled={websitePins.length === 0 || calendarPinMutationId !== null}
+          >
+            {calendarPinMutationId === -2 ? 'Rejecting...' : 'Reject All'}
+          </Button>
+        </div>
+
+        {calendarDayGroups.length === 0 ? (
+          <div className="bg-white border-2 border-black p-8 text-center text-gray-600">
+            No generated pins found for this website yet. Use onboarding to generate your first batch.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {calendarDayGroups.map((group) => (
+              <section key={group.key} className="bg-white border-2 border-black p-3">
+                <h2 className="text-2xl font-black">
+                  {group.label} ({group.pins.length} {group.pins.length === 1 ? 'pin' : 'pins'})
+                </h2>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {group.pins.map((pin) => {
+                    const pinApproved = pin.is_selected && pin.status !== 'skipped';
+                    return (
+                      <div key={pin.id} className="w-44 border border-black p-2 space-y-2">
+                        <button
+                          onClick={() => void openCalendarPinDetail(pin.id)}
+                          className="block w-full border border-black"
+                          title="Open details"
+                        >
+                          {pin.media_url ? (
+                            <img src={pin.media_url} alt="" className="w-full h-32 object-cover" />
+                          ) : (
+                            <div className="w-full h-32 bg-gray-100 flex items-center justify-center text-xs text-gray-500">No media</div>
+                          )}
+                        </button>
+                        <div className="text-xs">
+                          <div className="font-bold truncate">{pin.title || 'Untitled'}</div>
+                          <div className="text-gray-600 truncate">{pin.board_name || 'No board'}</div>
+                          <div className="text-gray-500">
+                            {pin.publish_date ? new Date(pin.publish_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unscheduled'}
+                          </div>
+                        </div>
+                        <div className={`text-[10px] uppercase font-black px-2 py-1 border border-black ${pinApproved ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                          {pinApproved ? 'Approved' : 'Rejected'}
+                        </div>
+                        <div className="grid grid-cols-2 gap-1">
+                          <button
+                            onClick={() => void updateCalendarPinStatus(pin, true)}
+                            disabled={calendarPinMutationId !== null}
+                            className="border border-black bg-green-100 text-green-700 text-xs font-bold uppercase py-1 disabled:opacity-50"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            onClick={() => void updateCalendarPinStatus(pin, false)}
+                            disabled={calendarPinMutationId !== null}
+                            className="border border-black bg-red-100 text-red-700 text-xs font-bold uppercase py-1 disabled:opacity-50"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+
+        {selectedCalendarPinId && (
+          <div className="fixed inset-0 z-50 bg-black/50" onClick={closeCalendarPinDetail}>
+            <aside
+              className="absolute right-0 top-0 h-full w-full max-w-2xl bg-white border-l-2 border-black p-4 overflow-y-auto"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-xl font-black uppercase">Pin details</h3>
+                <button onClick={closeCalendarPinDetail} className="border border-black px-2 py-1 text-xs font-black uppercase">
+                  Close
+                </button>
+              </div>
+              {calendarDetailLoading ? (
+                <div className="mt-4 text-sm text-gray-500">Loading pin details...</div>
+              ) : !calendarPinDetail ? (
+                <div className="mt-4 text-sm text-red-600">Unable to load pin details.</div>
+              ) : (
+                <div className="mt-4 space-y-4">
+                  <div className="border border-black p-2">
+                    {calendarPinDetail.pin.media_url ? (
+                      <img src={calendarPinDetail.pin.media_url} alt="" className="w-full max-h-[320px] object-contain bg-gray-50" />
+                    ) : (
+                      <div className="h-40 flex items-center justify-center text-gray-500">No rendered media</div>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                    <div className="border border-black p-2"><span className="text-gray-500">Pinterest Title</span><div className="font-bold">{calendarPinDetail.pin.title || '-'}</div></div>
+                    <div className="border border-black p-2"><span className="text-gray-500">Board</span><div className="font-bold">{calendarPinDetail.pin.board_name || '-'}</div></div>
+                    <div className="border border-black p-2 md:col-span-2"><span className="text-gray-500">Description</span><div>{calendarPinDetail.pin.description || '-'}</div></div>
+                    <div className="border border-black p-2 md:col-span-2"><span className="text-gray-500">Alt text</span><div>Not available</div></div>
+                    <div className="border border-black p-2 md:col-span-2">
+                      <span className="text-gray-500">Outbound URL</span>
+                      <div className="truncate">{calendarPinDetail.pin.link || calendarPinDetail.page.url || '-'}</div>
+                    </div>
+                    <div className="border border-black p-2"><span className="text-gray-500">Date To Publish</span><div>{calendarPinDetail.pin.publish_date ? new Date(calendarPinDetail.pin.publish_date).toLocaleString() : 'Not scheduled'}</div></div>
+                    <div className="border border-black p-2"><span className="text-gray-500">Text Align</span><div>{calendarPinDetail.pin.text_align || 'left'}</div></div>
+                  </div>
+                  <div className="border border-black p-2">
+                    <p className="text-xs uppercase font-black mb-2">Images</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {calendarPinDetail.images.map((image) => {
+                        const isSelected = image.url === calendarPinDetail.pin.selected_image_url;
+                        return (
+                          <div key={image.id} className={`border ${isSelected ? 'border-accent border-2' : 'border-black'} p-1`}>
+                            <img src={apiClient.proxyImageUrl(image.url)} alt="" className="w-full h-20 object-cover" />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </aside>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="bg-white border-2 border-black p-4">
         <div className="flex flex-wrap gap-2 items-center justify-between">
           <div>
             <h1 className="text-2xl font-black uppercase">Pin Workflow</h1>
-            <p className="text-xs text-gray-600">CSV-only generation flow with preview, scheduling metadata, and board assignment</p>
+            <p className="text-xs text-gray-600">CSV-only generation flow with preview, scheduling metadata, and settings-driven board selection</p>
           </div>
           <div className="text-xs border border-black px-2 py-1 bg-bg-secondary">
             Active website: {websites.find((w) => w.id === activeWebsiteId)?.name || 'None'}
@@ -1250,16 +1600,15 @@ export default function Generate() {
       </div>
 
       <div className="bg-white border-2 border-black p-3">
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-4 gap-2">
           {[
             [1, 'Pin Preview'],
             [2, 'Generation Settings'],
             [3, 'Pages To Use'],
-            [4, 'Boards To Use'],
-            [5, 'Review & Generate'],
+            [4, 'Review & Generate'],
           ].map(([id, label]) => {
             const stepId = id as Step;
-            const enabled = stepId === 1 || (stepId === 2 && canStep2) || (stepId === 3 && canStep3) || (stepId === 4 && canStep4) || (stepId === 5 && canStep5);
+            const enabled = stepId === 1 || (stepId === 2 && canStep2) || (stepId === 3 && canStep3) || (stepId === 4 && canStep4);
             return (
               <button
                 key={id}
@@ -1290,31 +1639,6 @@ export default function Generate() {
                   <option key={page.id} value={page.id}>{page.title || page.url}</option>
                 ))}
               </select>
-
-              <div className="border border-black">
-                <div className="px-3 py-2 bg-bg-secondary font-black text-sm">AI Content Generation</div>
-                <div className="p-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={settings.ai.generate_titles} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, generate_titles: e.target.checked } }))} />Generate titles</label>
-                  <label className="flex items-center gap-2"><input type="checkbox" checked={settings.ai.generate_descriptions} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, generate_descriptions: e.target.checked } }))} />Generate descriptions</label>
-                  <input value={settings.ai.tone} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, tone: e.target.value } }))} className="px-2 py-1 border border-black" placeholder="Tone (seo-friendly/clickable/etc.)" />
-                  <input type="number" min={1} max={10} value={settings.ai.variants} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, variants: Number(e.target.value) } }))} className="px-2 py-1 border border-black" />
-                  <select value={settings.ai.keyword_mode} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, keyword_mode: e.target.value as 'auto' | 'manual' } }))} className="px-2 py-1 border border-black">
-                    <option value="auto">Keywords: Auto</option>
-                    <option value="manual">Keywords: Manual</option>
-                  </select>
-                  <input value={settings.ai.manual_keywords} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, manual_keywords: e.target.value } }))} className="px-2 py-1 border border-black" placeholder="Manual keywords (comma-separated)" disabled={settings.ai.keyword_mode !== 'manual'} />
-                  <select value={settings.ai.cta_style} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, cta_style: e.target.value as 'soft' | 'strong' | 'none' } }))} className="px-2 py-1 border border-black">
-                    <option value="soft">CTA: Soft</option>
-                    <option value="strong">CTA: Strong</option>
-                    <option value="none">CTA: None</option>
-                  </select>
-                  <div className="px-2 py-1 border border-black bg-gray-50 text-xs flex items-center">
-                    Language is controlled in global AI Settings
-                  </div>
-                  <input type="number" min={20} max={200} value={settings.ai.title_max} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, title_max: Number(e.target.value) } }))} className="px-2 py-1 border border-black" placeholder="Title max chars" />
-                  <input type="number" min={60} max={1000} value={settings.ai.description_max} onChange={(e) => setSettings((prev) => ({ ...prev, ai: { ...prev.ai, description_max: Number(e.target.value) } }))} className="px-2 py-1 border border-black" placeholder="Description max chars" />
-                </div>
-              </div>
 
               <div className="border border-black">
                 <div className="px-3 py-2 bg-bg-secondary font-black text-sm">Design Customization</div>
@@ -1532,12 +1856,117 @@ export default function Generate() {
                   <input type="number" min={1} value={settings.generation.daily_pin_count} onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, daily_pin_count: Number(e.target.value) } }))} className="w-full px-2 py-1 border border-black" />
                   <p className="text-xs text-gray-600">CSV-only workflow. Pinterest connection is optional.</p>
                 </div>
-                <div className="border border-black p-3 space-y-2">
+                <div className="border border-black p-3 space-y-3">
                   <p className="font-black text-sm">Scheduling Options</p>
-                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.generation.warmup_month} onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, warmup_month: e.target.checked } }))} />Warmup month</label>
-                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.generation.floating_days} onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, floating_days: e.target.checked } }))} />Use floating days</label>
-                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.generation.randomize_posting_times} onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, randomize_posting_times: e.target.checked } }))} />Randomize posting times</label>
-                  <input type="number" value={settings.generation.max_floating_minutes} onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, max_floating_minutes: Number(e.target.value) } }))} className="w-full px-2 py-1 border border-black" placeholder="Max floating minutes" />
+                  <label className="block border border-black p-2 text-sm">
+                    <span className="flex items-center gap-2 font-bold">
+                      <input
+                        type="checkbox"
+                        checked={settings.generation.warmup_month}
+                        onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, warmup_month: e.target.checked } }))}
+                      />
+                      Warmup my account for a month
+                    </span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Gradually ramp daily pin count across 4 weeks.
+                    </span>
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="flex items-center gap-2 font-bold">
+                      <input
+                        type="checkbox"
+                        checked={settings.generation.floating_days}
+                        onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, floating_days: e.target.checked } }))}
+                      />
+                      Use floating days (randomize daily pin count +/-2)
+                    </span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Makes daily volume less predictable.
+                    </span>
+                  </label>
+
+                  <label className="block text-sm">
+                    <span className="flex items-center gap-2 font-bold">
+                      <input
+                        type="checkbox"
+                        checked={settings.generation.randomize_posting_times}
+                        onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, randomize_posting_times: e.target.checked } }))}
+                      />
+                      Randomize posting times
+                    </span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Adds +/- minute offsets in available time gaps.
+                    </span>
+                  </label>
+
+                  <div className="space-y-1">
+                    <label className="font-bold text-xs uppercase">Maximum floating minutes</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={240}
+                      disabled={!settings.generation.randomize_posting_times}
+                      value={settings.generation.max_floating_minutes}
+                      onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, max_floating_minutes: Number(e.target.value) } }))}
+                      className="w-full px-2 py-1 border border-black disabled:bg-gray-100"
+                    />
+                  </div>
+
+                  <label className="block text-sm border-t border-black pt-2">
+                    <span className="flex items-center gap-2 font-bold">
+                      <input
+                        type="checkbox"
+                        checked={settings.generation.advanced_scheduling}
+                        onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, advanced_scheduling: e.target.checked } }))}
+                      />
+                      Advanced scheduling
+                    </span>
+                    <span className="mt-1 block text-xs text-gray-600">
+                      Set custom timezone and posting hours.
+                    </span>
+                  </label>
+
+                  {settings.generation.advanced_scheduling && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                      <div className="md:col-span-3 space-y-1">
+                        <label className="font-bold text-xs uppercase">Timezone</label>
+                        <select
+                          value={settings.generation.timezone}
+                          onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, timezone: e.target.value } }))}
+                          className="w-full px-2 py-1 border border-black"
+                        >
+                          {timezoneOptions.map((timezone) => (
+                            <option key={timezone} value={timezone}>{timezone}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="font-bold text-xs uppercase">Start hour</label>
+                        <select
+                          value={settings.generation.start_hour}
+                          onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, start_hour: Number(e.target.value) } }))}
+                          className="w-full px-2 py-1 border border-black"
+                        >
+                          {Array.from({ length: 24 }, (_, hour) => (
+                            <option key={hour} value={hour}>{hour.toString().padStart(2, '0')}:00</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="font-bold text-xs uppercase">End hour</label>
+                        <select
+                          value={settings.generation.end_hour}
+                          onChange={(e) => setSettings((prev) => ({ ...prev, generation: { ...prev.generation, end_hour: Number(e.target.value) } }))}
+                          className="w-full px-2 py-1 border border-black"
+                        >
+                          {Array.from({ length: 24 }, (_, hour) => (
+                            <option key={hour} value={hour}>{hour.toString().padStart(2, '0')}:00</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="border border-black p-3 space-y-3 md:col-span-2">
                   <p className="font-black text-sm">Content Settings</p>
@@ -1732,62 +2161,18 @@ export default function Generate() {
 
           {step === 4 && (
             <div className="space-y-4">
-              <h2 className="font-black uppercase">Name Your Export Boards</h2>
-              <div className="border-2 border-black p-3">
-                <p className="font-black text-sm mb-2">AI Board Name Generator</p>
-                <p className="text-xs text-gray-600 mb-2">Uses your default Board preset from AI Settings when available.</p>
-                <div className="flex gap-2">
-                  <input type="number" min={1} max={20} value={boardSuggestCount} onChange={(e) => setBoardSuggestCount(Number(e.target.value))} className="w-24 px-2 py-1 border border-black" />
-                  <Button onClick={suggestBoards}>Generate Boards</Button>
-                </div>
-                <label className="flex items-center gap-2 mt-2 text-xs font-bold uppercase">
-                  <input
-                    type="checkbox"
-                    checked={replaceAiBoardsOnSuggest}
-                    onChange={(e) => setReplaceAiBoardsOnSuggest(e.target.checked)}
-                  />
-                  Replace previous AI boards
-                </label>
-              </div>
-              <div className="border border-black p-3 space-y-2">
-                <div className="flex gap-2">
-                  <input value={newBoardName} onChange={(e) => setNewBoardName(e.target.value)} placeholder="Add board manually" className="flex-1 px-2 py-1 border border-black" />
-                  <Button onClick={addBoard}>Add</Button>
-                </div>
-                {visibleBoards.length === 0 ? (
-                  <p className="text-sm text-gray-500">No boards yet for the current selected pages. Generate with AI or add manually.</p>
-                ) : (
-                  <div className="space-y-1 max-h-56 overflow-y-auto">
-                    {visibleBoards.map((board) => (
-                      <div key={board.id} className="flex items-center justify-between border border-black px-2 py-1">
-                        <span className="text-sm font-bold">{board.name}</span>
-                        <button onClick={() => removeBoard(board.id)} className="text-xs text-red-600 font-bold uppercase">Delete</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="flex justify-between">
-                <Button variant="secondary" onClick={() => goToStep(3)}>Back</Button>
-                <Button onClick={() => goToStep(5)} disabled={!canStep5}>Continue</Button>
-              </div>
-            </div>
-          )}
-
-          {step === 5 && (
-            <div className="space-y-4">
               <h2 className="font-black uppercase">Review & Generate</h2>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                 <div className="border-2 border-black p-2"><p className="text-xs">Pin Schedule</p><p className="font-black">{settings.generation.daily_pin_count}/day</p></div>
                 <div className="border-2 border-black p-2"><p className="text-xs">Selected Pages</p><p className="font-black">{selectedPageIds.size}</p></div>
-                <div className="border-2 border-black p-2"><p className="text-xs">Boards</p><p className="font-black">{visibleBoards.length}</p></div>
+                <div className="border-2 border-black p-2"><p className="text-xs">Boards Source</p><p className="font-black">Settings List</p></div>
                 <div className="border-2 border-black p-2"><p className="text-xs">Destination</p><p className="font-black">CSV Export</p></div>
               </div>
               <div className="border border-black p-3 bg-bg-secondary">
                 <p className="font-black text-sm mb-2">What Happens Next</p>
                 <ul className="text-sm list-disc ml-5">
                   <li>Generate pins for selected pages and templates</li>
-                  <li>Assign boards using your configured board list</li>
+                  <li>AI picks board from Settings list (fallback: General)</li>
                   <li>Apply spacing and per-URL limit safety rules</li>
                   <li>Review generated output and export CSV manually</li>
                 </ul>
@@ -1797,7 +2182,7 @@ export default function Generate() {
                   <Button variant="secondary" onClick={runPreview} disabled={previewing}>
                     {previewing ? 'Previewing...' : 'Refresh Preview'}
                   </Button>
-                  <Button onClick={generatePins} disabled={generating || !canStep5}>
+                  <Button onClick={generatePins} disabled={generating || !canStep4}>
                     {generating ? 'Generating...' : 'Start Generating Pins'}
                   </Button>
                   <Button variant="secondary" onClick={exportGeneratedCsv} disabled={exporting || pins.length === 0}>
@@ -1848,8 +2233,8 @@ export default function Generate() {
                 )}
               </div>
               <div className="flex justify-between">
-                <Button variant="secondary" onClick={() => goToStep(4)}>Back</Button>
-                <span className="text-xs text-gray-500 self-center">Step 5 of 5</span>
+                <Button variant="secondary" onClick={() => goToStep(3)}>Back</Button>
+                <span className="text-xs text-gray-500 self-center">Step 4 of 4</span>
               </div>
             </div>
           )}
@@ -1873,6 +2258,7 @@ export default function Generate() {
                   template={selectedTemplate}
                   imageUrls={previewPinImageUrls}
                   title={previewPage.title || 'Untitled'}
+                  link={previewPage.url || ''}
                   settings={previewStyle}
                   onZoneChange={(zone, value) =>
                     setPreviewStyle((prev) => ({

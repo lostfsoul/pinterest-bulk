@@ -34,6 +34,7 @@ def parse_svg_template(svg_content: str) -> Dict[str, Any]:
             - text_zone_border_color: detected border color (if any)
             - text_zone_text_color: detected text color (if any)
             - text_elements: list of static text elements
+            - secondary_text_slots: list of editable secondary text slot metadata
             - stripped_svg: SVG with placeholders removed for overlay
     """
     # Parse SVG
@@ -80,6 +81,18 @@ def parse_svg_template(svg_content: str) -> Dict[str, Any]:
     # Extract static text elements (for footer, brand, etc.)
     text_elements = extract_text_elements(root, text_zone_y, text_zone_height)
 
+    # Detect editable secondary text slots (including path-based text exports).
+    secondary_text_slots = detect_secondary_text_slots(
+        root=root,
+        clip_paths=clip_paths,
+        image_clip_ids=image_clip_ids,
+        zones=zones,
+        canvas_width=width,
+        canvas_height=height,
+        text_zone_y=text_zone_y,
+        text_zone_height=text_zone_height,
+    )
+
     # Strip placeholders and create overlay SVG
     stripped_svg = strip_placeholders(svg_content, text_zone_y, text_zone_height)
 
@@ -96,6 +109,7 @@ def parse_svg_template(svg_content: str) -> Dict[str, Any]:
         'text_zone_border_width': text_zone_border_width,
         'text_zone_text_color': text_zone_text_color,
         'text_elements': text_elements,
+        'secondary_text_slots': secondary_text_slots,
         'stripped_svg': stripped_svg,
     }
 
@@ -763,6 +777,266 @@ def extract_text_elements(root: ET.Element, text_zone_y: int, text_zone_height: 
     return elements
 
 
+def _extract_text_node_content(elem: ET.Element) -> str:
+    chunks: list[str] = []
+    if elem.text:
+        chunks.append(elem.text)
+    for child in elem.iter():
+        if child is elem:
+            continue
+        if child.text:
+            chunks.append(child.text)
+    value = " ".join(part.strip() for part in chunks if part and part.strip())
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _coerce_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_hex_color(value: Any, fallback: str = "#000000") -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return fallback
+    if re.fullmatch(r"#[0-9a-f]{3}", text) or re.fullmatch(r"#[0-9a-f]{6}", text):
+        return text
+    if text in {"black", "white", "red", "green", "blue"}:
+        mapping = {
+            "black": "#000000",
+            "white": "#ffffff",
+            "red": "#ff0000",
+            "green": "#008000",
+            "blue": "#0000ff",
+        }
+        return mapping[text]
+    return fallback
+
+
+def _bbox_overlap_area(a: Dict[str, float], b: Dict[str, float]) -> float:
+    x1 = max(a["x"], b["x"])
+    y1 = max(a["y"], b["y"])
+    x2 = min(a["x"] + a["width"], b["x"] + b["width"])
+    y2 = min(a["y"] + a["height"], b["y"] + b["height"])
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return (x2 - x1) * (y2 - y1)
+
+
+def _slot_id_for_bbox(source_type: str, bbox: Dict[str, float]) -> str:
+    x = int(round(bbox["x"]))
+    y = int(round(bbox["y"]))
+    w = int(round(bbox["width"]))
+    h = int(round(bbox["height"]))
+    return f"slot_{source_type}_{x}_{y}_{w}_{h}"
+
+
+def detect_secondary_text_slots(
+    root: ET.Element,
+    clip_paths: Dict[str, Dict[str, float]],
+    image_clip_ids: set[str],
+    zones: List[Dict[str, float]],
+    canvas_width: int,
+    canvas_height: int,
+    text_zone_y: int,
+    text_zone_height: int,
+) -> List[Dict[str, Any]]:
+    """Detect editable secondary text slots from real text and path-based exports."""
+    parent_map = {c: p for p in root.iter() for c in p}
+    title_zone = {
+        "x": 0.0,
+        "y": float(text_zone_y),
+        "width": float(canvas_width),
+        "height": float(text_zone_height),
+    }
+    canvas_area = float(canvas_width * canvas_height)
+    candidates: list[Dict[str, Any]] = []
+
+    # 1) Native text nodes.
+    for elem in root.iter():
+        if not elem.tag.endswith("text"):
+            continue
+        content = _extract_text_node_content(elem)
+        if not content:
+            continue
+
+        font_size = max(10.0, _coerce_float(elem.get("font-size"), 16.0))
+        x = _coerce_float(elem.get("x"), 0.0)
+        y = _coerce_float(elem.get("y"), 0.0)
+        est_width = max(20.0, min(float(canvas_width), len(content) * font_size * 0.58))
+        est_height = max(14.0, font_size * 1.35)
+        bbox = {"x": x, "y": y - est_height, "width": est_width, "height": est_height}
+
+        total_transform = accumulate_element_transform(elem, parent_map, root)
+        transformed = apply_bbox_transform(bbox, total_transform)
+        clamped = clamp_bbox_to_canvas(transformed, canvas_width, canvas_height)
+        if not clamped:
+            continue
+
+        # Keep slots outside main generated title area.
+        overlap = _bbox_overlap_area(clamped, title_zone)
+        if overlap > 0 and overlap / max(1.0, clamped["width"] * clamped["height"]) > 0.45:
+            continue
+
+        fill = _normalize_hex_color(elem.get("fill"), "#000000")
+        text_anchor = (elem.get("text-anchor") or "start").strip().lower()
+        align = "left"
+        if text_anchor == "middle":
+            align = "center"
+        elif text_anchor == "end":
+            align = "right"
+
+        candidates.append(
+            {
+                "source_type": "text",
+                "x": clamped["x"],
+                "y": clamped["y"],
+                "width": clamped["width"],
+                "height": clamped["height"],
+                "default_text": content,
+                "text_align": align,
+                "text_color": fill,
+            }
+        )
+
+    # 2) Path-based text blocks (Canva-like exports with outlined glyphs).
+    for elem in root.iter():
+        cp_attr = elem.get("clip-path")
+        if not cp_attr:
+            continue
+        match = re.search(r"url\(#([^)]+)\)", cp_attr)
+        if not match:
+            continue
+        cp_id = match.group(1)
+        if cp_id in image_clip_ids:
+            continue
+        bbox = clip_paths.get(cp_id)
+        if not bbox:
+            continue
+        area = bbox["width"] * bbox["height"]
+        if area < 300 or area > (canvas_area * 0.7):
+            continue
+
+        has_path = any(child.tag.endswith("path") for child in elem.iter())
+        has_image = any(child.tag.endswith("image") for child in elem.iter())
+        if not has_path or has_image:
+            continue
+
+        transform = accumulate_element_transform(elem, parent_map, root)
+        transformed = apply_bbox_transform(bbox, transform)
+        clamped = clamp_bbox_to_canvas(transformed, canvas_width, canvas_height)
+        if not clamped:
+            continue
+        if clamped["width"] < 30 or clamped["height"] < 12:
+            continue
+        if clamped["width"] < (clamped["height"] * 1.2):
+            continue
+
+        # Ignore main title placeholder area; keep top/bottom badges and secondary blocks.
+        overlap = _bbox_overlap_area(clamped, title_zone)
+        if overlap > 0 and overlap / max(1.0, clamped["width"] * clamped["height"]) > 0.45:
+            continue
+
+        fill = elem.get("fill")
+        if not fill:
+            for child in elem.iter():
+                if child.get("fill") and child.get("fill") != "none":
+                    fill = child.get("fill")
+                    break
+
+        candidates.append(
+            {
+                "source_type": "path",
+                "x": clamped["x"],
+                "y": clamped["y"],
+                "width": clamped["width"],
+                "height": clamped["height"],
+                "default_text": "",
+                "text_align": "center",
+                "text_color": _normalize_hex_color(fill, "#000000"),
+            }
+        )
+
+    # De-duplicate near-identical candidates using overlap ratio.
+    deduped: list[Dict[str, Any]] = []
+    for candidate in sorted(candidates, key=lambda c: c["width"] * c["height"], reverse=True):
+        candidate_bbox = {
+            "x": candidate["x"],
+            "y": candidate["y"],
+            "width": candidate["width"],
+            "height": candidate["height"],
+        }
+        candidate_area = max(1.0, candidate_bbox["width"] * candidate_bbox["height"])
+        duplicate = False
+        for kept in deduped:
+            kept_bbox = {
+                "x": kept["x"],
+                "y": kept["y"],
+                "width": kept["width"],
+                "height": kept["height"],
+            }
+            kept_area = max(1.0, kept_bbox["width"] * kept_bbox["height"])
+            overlap = _bbox_overlap_area(candidate_bbox, kept_bbox)
+            ratio = overlap / min(candidate_area, kept_area)
+            if ratio >= 0.92:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        deduped.append(candidate)
+    deduped.sort(key=lambda c: (c["y"], c["x"]))
+
+    # Build stable slot schema used by template parameters UI / renderer.
+    slots: list[Dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for candidate in deduped:
+        bbox = {
+            "x": candidate["x"],
+            "y": candidate["y"],
+            "width": candidate["width"],
+            "height": candidate["height"],
+        }
+        slot_id = _slot_id_for_bbox(candidate["source_type"], bbox)
+        if slot_id in used_ids:
+            suffix = 2
+            while f"{slot_id}_{suffix}" in used_ids:
+                suffix += 1
+            slot_id = f"{slot_id}_{suffix}"
+        used_ids.add(slot_id)
+
+        suggested_font_size = int(max(12, min(96, round(candidate["height"] * 0.44))))
+        slots.append(
+            {
+                "slot_id": slot_id,
+                "label": f"Secondary Text {len(slots) + 1}",
+                "source_type": candidate["source_type"],
+                "x": int(round(candidate["x"])),
+                "y": int(round(candidate["y"])),
+                "width": int(round(candidate["width"])),
+                "height": int(round(candidate["height"])),
+                "enabled": True,
+                "mask_original": True,
+                "text_align": candidate["text_align"],
+                "font_family": '"Poppins", "Segoe UI", Arial, sans-serif',
+                "font_weight": "700",
+                "font_size": suggested_font_size,
+                "text_color": candidate["text_color"],
+                "text_effect": "none",
+                "text_effect_color": "#000000",
+                "text_effect_offset_x": 2,
+                "text_effect_offset_y": 2,
+                "text_effect_blur": 0,
+                "max_lines": 2,
+                "uppercase": False,
+                "default_text": candidate.get("default_text", ""),
+            }
+        )
+
+    return slots
+
+
 def is_text_in_zone(elem: ET.Element, text_zone_y: int, text_zone_height: int) -> bool:
     """Return True when a text element belongs to the editable title zone."""
     y_value = elem.get('y')
@@ -791,77 +1065,18 @@ def strip_placeholders(svg_content: str, text_zone_y: int, text_zone_height: int
 
     Removes:
     1. <image> placeholder elements
-    2. Large white background rects extending beyond canvas
-    3. Canva-style placeholder text (path-based, nested g[fill-opacity] groups)
+    2. Large background rects extending beyond canvas
 
-    Uses xml.etree for proper DOM traversal (regex is too fragile for nested structures).
+    Keeps text/path layers so template parameters can selectively mask/edit
+    secondary copy at render time.
     """
-    # Parse SVG with ElementTree
     try:
         root = ET.fromstring(svg_content)
     except ET.ParseError as e:
         logger.warning(f"Failed to parse SVG for placeholder removal: {e}, falling back to regex")
         return _strip_placeholders_fallback(svg_content)
 
-    # Build parent map for removal
-    parent_map = {c: p for p in root.iter() for c in p}
-
-    # Define text zone bounds (with some padding)
-    tz_top_strict = text_zone_y - 10
-    tz_bottom_strict = text_zone_y + text_zone_height + 10
-
-    # Find and remove Canva-style placeholder text groups anywhere in the template.
-    elements_to_remove = []
-
-    for elem in root.iter():
-        fill_opacity = elem.get('fill-opacity')
-        if fill_opacity is None:
-            continue
-
-        # Skip structural clip groups or already-transformed groups
-        if elem.get('clip-path'):
-            continue
-        if elem.get('transform'):
-            continue
-
-        # Check for direct child with transform
-        child_transform_elem = None
-        for child in elem:
-            if child.get('transform'):
-                child_transform_elem = child
-                break
-
-        if not child_transform_elem:
-            continue
-
-        has_path_descendants = any(desc.tag.endswith('path') for desc in elem.iter())
-        has_image_descendants = any(desc.tag.endswith('image') for desc in elem.iter())
-        if has_path_descendants and not has_image_descendants:
-            elements_to_remove.append(elem)
-
-    # Remove identified elements using parent map
-    for elem in elements_to_remove:
-        parent = parent_map.get(elem)
-        if parent is not None:
-            parent.remove(elem)
-
-    text_elements_to_remove = []
-    for elem in root.iter():
-        if elem.tag.endswith('text'):
-            text_elements_to_remove.append(elem)
-
-    for elem in text_elements_to_remove:
-        parent = parent_map.get(elem)
-        if parent is not None:
-            parent.remove(elem)
-
-    logger.info(f"Removed {len(elements_to_remove)} Canva-style placeholder elements")
-    logger.info(f"Removed {len(text_elements_to_remove)} text elements from title zone")
-
-    # Convert back to string
     result = ET.tostring(root, encoding='unicode')
-
-    # Also remove image elements and large background rects (keep existing logic)
     result = re.sub(r'<image[^>]*>', '', result)
     result = re.sub(r'</image>', '', result)
     result = re.sub(r'<rect[^>]*\s(?:x|y)=["\']-\d[^>]*>', '', result)

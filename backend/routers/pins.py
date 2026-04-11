@@ -5,16 +5,30 @@ import asyncio
 import re
 from datetime import datetime, timedelta
 from typing import Callable, List, Optional
+from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from database import get_db, SessionLocal
-from models import Page, PageImage, PageKeyword, PinDraft, Template, AIPromptPreset, AISettings, Website, Board, GenerationJob
+from models import (
+    Page,
+    PageImage,
+    SEOKeyword,
+    PinDraft,
+    Template,
+    AIPromptPreset,
+    AISettings,
+    Website,
+    GenerationJob,
+    WebsiteTrendKeyword,
+)
 from schemas import (
     GenerationPreviewRequest,
     GenerationPreviewResponse,
     GenerationJobResponse,
+    PinDraftDetailResponse,
     PinDraftResponse,
     PinDraftUpdate,
     PinGenerateRequest,
@@ -22,6 +36,7 @@ from schemas import (
 )
 from routers.images import scrape_page_into_db
 from services.palette import normalize_hex_color, resolve_palette_settings
+from services.trend_ranking import rank_pages_for_trends
 
 router = APIRouter()
 
@@ -83,6 +98,28 @@ def _emit_progress(callback: ProgressCallback | None, **payload) -> None:
         callback(payload)
 
 
+def _split_keyword_csv(value: str | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in (value or "").split(","):
+        keyword = item.strip()
+        if not keyword:
+            continue
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(keyword)
+    return result
+
+
+def _load_seo_keywords_by_url(db: Session, urls: list[str]) -> dict[str, list[str]]:
+    if not urls:
+        return {}
+    rows = db.query(SEOKeyword).filter(SEOKeyword.url.in_(urls)).all()
+    return {row.url: _split_keyword_csv(row.keywords) for row in rows}
+
+
 def _build_generation_context(
     db: Session,
     request: PinGenerateRequest,
@@ -104,44 +141,51 @@ def _build_generation_context(
     default_language = (ai_settings.default_language if ai_settings else None) or "English"
     requested_language = (request.language or "").strip() or None
 
+    base_query = db.query(Page).filter(Page.is_enabled == True)
     if request.page_ids:
-        pages = (
-            db.query(Page)
-            .filter(Page.id.in_(request.page_ids), Page.is_enabled == True)
-            .all()
-        )
+        pages = base_query.filter(Page.id.in_(request.page_ids)).all()
+        order = {page_id: idx for idx, page_id in enumerate(request.page_ids)}
+        pages.sort(key=lambda page: order.get(page.id, len(order)))
     elif request.website_id:
-        pages = (
-            db.query(Page)
-            .filter(Page.website_id == request.website_id, Page.is_enabled == True)
-            .all()
-        )
+        pages = base_query.filter(Page.website_id == request.website_id).all()
     else:
-        pages = db.query(Page).filter(Page.is_enabled == True).all()
+        pages = base_query.all()
 
     if not pages:
         raise HTTPException(status_code=400, detail="No pages found")
 
-    pages = filter_pages_by_active_selection_keywords(pages)
-    if not pages:
-        raise HTTPException(status_code=400, detail="No pages matched active selection keywords")
+    seo_keywords_by_url = _load_seo_keywords_by_url(db, [page.url for page in pages])
 
     page_website_names: dict[int, str] = {}
     website_generation_settings: dict[int, dict] = {}
+    website_trend_keywords: dict[int, list[WebsiteTrendKeyword]] = {}
     website_ids = set(p.website_id for p in pages)
     if website_ids:
         websites = db.query(Website).filter(Website.id.in_(website_ids)).all()
         page_website_names = {w.id: w.name for w in websites}
         website_generation_settings = {w.id: (w.generation_settings or {}) for w in websites}
+        trend_rows = (
+            db.query(WebsiteTrendKeyword)
+            .filter(WebsiteTrendKeyword.website_id.in_(website_ids))
+            .all()
+        )
+        for row in trend_rows:
+            website_trend_keywords.setdefault(row.website_id, []).append(row)
 
-    website_boards: dict[int, list[Board]] = {}
-    if website_ids:
-        all_boards = db.query(Board).filter(Board.website_id.in_(website_ids)).all()
-        selected_page_ids = {page.id for page in pages}
-        for board in all_boards:
-            website_boards.setdefault(board.website_id, []).append(board)
-        for website_id, site_boards in list(website_boards.items()):
-            website_boards[website_id] = filter_boards_for_page_pool(site_boards, selected_page_ids)
+    pages, ranking_meta = rank_pages_for_trends(
+        pages,
+        trend_keywords_by_website=website_trend_keywords,
+        generation_settings_by_website=website_generation_settings,
+        top_n_override=request.top_n,
+        similarity_threshold_override=request.similarity_threshold,
+        diversity_enabled_override=request.diversity_enabled,
+        diversity_penalty_override=request.diversity_penalty,
+        semantic_enabled_override=request.semantic_enabled,
+        seo_keywords_by_url=seo_keywords_by_url,
+    )
+
+    if not pages:
+        raise HTTPException(status_code=400, detail="No pages available after trend ranking")
 
     return {
         "template": template,
@@ -152,9 +196,10 @@ def _build_generation_context(
         "default_language": default_language,
         "requested_language": requested_language,
         "pages": pages,
+        "seo_keywords_by_url": seo_keywords_by_url,
         "page_website_names": page_website_names,
         "website_generation_settings": website_generation_settings,
-        "website_boards": website_boards,
+        "ranking_meta": ranking_meta,
     }
 
 
@@ -174,9 +219,10 @@ def _generate_pin_drafts(
     default_language = context["default_language"]
     requested_language = context["requested_language"]
     pages: list[Page] = context["pages"]
+    seo_keywords_by_url: dict[str, list[str]] = context["seo_keywords_by_url"]
     page_website_names: dict[int, str] = context["page_website_names"]
     website_generation_settings: dict[int, dict] = context["website_generation_settings"]
-    website_boards: dict[int, list[Board]] = context["website_boards"]
+    ranking_meta: dict = context.get("ranking_meta", {})
 
     pins_created = 0
     all_new_pins: list[PinDraft] = []
@@ -205,14 +251,28 @@ def _generate_pin_drafts(
         scraped_pages=0,
         failed_pages=0,
         total_pins=0,
+        ranking_applied=bool(ranking_meta.get("ranking_applied")),
+        ranking_reason=ranking_meta.get("reason"),
     )
 
     for index, page in enumerate(pages, start=1):
-        keywords = manual_keywords if use_manual_keywords else select_keywords_for_generation(page.keywords)
+        keywords = manual_keywords if use_manual_keywords else select_keywords_for_generation(
+            seo_keywords_by_url.get(page.url, [])
+        )
         website_name = page_website_names.get(page.website_id, "")
         site_settings = website_generation_settings.get(page.website_id, {})
-        image_settings = site_settings.get("image", {}) if isinstance(site_settings, dict) else {}
-        content_settings = site_settings.get("content_settings", {}) if isinstance(site_settings, dict) else {}
+        image_settings = {}
+        content_settings = {}
+        if isinstance(site_settings, dict):
+            if isinstance(site_settings.get("image"), dict):
+                image_settings = site_settings.get("image", {})
+            elif isinstance(site_settings.get("image_settings"), dict):
+                image_settings = site_settings.get("image_settings", {})
+
+            if isinstance(site_settings.get("content"), dict):
+                content_settings = site_settings.get("content", {})
+            elif isinstance(site_settings.get("content_settings"), dict):
+                content_settings = site_settings.get("content_settings", {})
         desired_gap_days = int(content_settings.get("desired_gap_days", 0) or 0)
         lifetime_limit_enabled = bool(content_settings.get("lifetime_limit_enabled", False))
         lifetime_limit_count = int(content_settings.get("lifetime_limit_count", 0) or 0)
@@ -308,19 +368,23 @@ def _generate_pin_drafts(
             description_max=request.description_max,
             generate_descriptions=request.generate_descriptions,
         )
+        board_candidates = extract_board_candidates(site_settings)
+        default_board = board_candidates[0] if board_candidates else request.board_name
         pin_board = generate_board_name_ai(
             page,
             keywords,
             preset=board_preset,
             language=page_language,
-            default_board=request.board_name,
+            default_board=default_board,
             website_name=website_name,
+            board_list=board_candidates,
         )
         pin_board = assign_board_name(
             page=page,
-            boards=website_boards.get(page.website_id, []),
+            board_candidates=board_candidates,
             keywords=keywords,
-            fallback=pin_board or request.board_name,
+            ai_suggestion=pin_board,
+            fallback=default_board,
         )
 
         existing_pins = (
@@ -576,7 +640,7 @@ def build_render_settings(template: Template, request_settings: Optional[PinRend
         "manual_palette_background_color": text_zone_props.get("manual_palette_background_color") or "#ffffff",
         "manual_palette_text_color": text_zone_props.get("manual_palette_text_color") or "#000000",
         "manual_palette_effect_color": text_zone_props.get("manual_palette_effect_color") or "#000000",
-        "font_family": text_zone_props.get("font_family") or '"Bebas Neue", Impact, sans-serif',
+        "font_family": text_zone_props.get("font_family") or '"Poppins", "Segoe UI", Arial, sans-serif',
         "text_color": text_zone_props.get("text_color") or "#000000",
         "text_effect": text_zone_props.get("text_effect") or "none",
         "text_effect_color": text_zone_props.get("text_effect_color") or "#000000",
@@ -650,7 +714,7 @@ def fill_missing_settings_from_template(pin: PinDraft, db: Session, settings: di
     if not settings.get("text_align"):
         settings["text_align"] = props.get("text_align") or "left"
     if not settings.get("font_family"):
-        settings["font_family"] = props.get("font_family") or '"Bebas Neue", Impact, sans-serif'
+        settings["font_family"] = props.get("font_family") or '"Poppins", "Segoe UI", Arial, sans-serif'
     if not settings.get("custom_font_file"):
         settings["custom_font_file"] = props.get("custom_font_file")
     if not settings.get("text_zone_bg_color"):
@@ -766,151 +830,21 @@ def generate_pin_description(page: Page, keywords: List[str]) -> str:
     return sanitize_generated_text("\n\n".join(parts) if parts else "")
 
 
-def _derive_active_season_from_month(active_month: str) -> str | None:
-    """Derive meteorological season for Northern Hemisphere from month name."""
-    season_by_month = {
-        "december": "winter",
-        "january": "winter",
-        "february": "winter",
-        "march": "spring",
-        "april": "spring",
-        "may": "spring",
-        "june": "summer",
-        "july": "summer",
-        "august": "summer",
-        "september": "autumn",
-        "october": "autumn",
-        "november": "autumn",
-    }
-    return season_by_month.get(active_month)
-
-
-def _normalize_text_for_match(value: str | None) -> str:
-    text = (value or "").lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _extract_url_slug(url: str | None) -> str:
-    if not url:
-        return ""
-    slug = url.rstrip("/").split("/")[-1]
-    return _normalize_text_for_match(slug)
-
-
-def select_keywords_for_generation(page_keywords: List[PageKeyword]) -> List[str]:
-    """Prioritize active month, then active season, then always, then fallback."""
-    active_month = datetime.utcnow().strftime("%B").lower()
-    active_season = _derive_active_season_from_month(active_month)
-    month_keywords: list[str] = []
-    season_keywords: list[str] = []
-    always_keywords: list[str] = []
-    fallback_keywords: list[str] = []
+def select_keywords_for_generation(page_keywords: list[str]) -> list[str]:
+    """Return de-duplicated SEO keywords for a page."""
+    keywords: list[str] = []
+    seen: set[str] = set()
 
     for item in page_keywords:
-        keyword = (item.keyword or "").strip()
+        keyword = (item or "").strip()
         if not keyword:
             continue
-        if (item.keyword_role or "seo").strip().lower() != "seo":
+        key = keyword.casefold()
+        if key in seen:
             continue
-
-        period_type = (item.period_type or "always").strip().lower()
-        period_value = (item.period_value or "").strip().lower()
-        if period_type == "month" and period_value == active_month:
-            month_keywords.append(keyword)
-        elif period_type == "season" and active_season and period_value == active_season:
-            season_keywords.append(keyword)
-        elif period_type == "always":
-            always_keywords.append(keyword)
-        else:
-            fallback_keywords.append(keyword)
-
-    if month_keywords:
-        ordered = month_keywords + [k for k in season_keywords if k not in month_keywords]
-        ordered += [k for k in always_keywords if k not in ordered]
-        return ordered
-    if season_keywords:
-        ordered = season_keywords + [k for k in always_keywords if k not in season_keywords]
-        return ordered
-    if always_keywords:
-        return always_keywords
-    return fallback_keywords
-
-
-def page_matches_selection_keywords(page: Page, page_keywords: List[PageKeyword]) -> bool:
-    """Return whether page is eligible based on active-period selection keywords."""
-    selection_rows = [
-        row for row in page_keywords
-        if (row.keyword_role or "seo").strip().lower() == "selection"
-    ]
-    if not selection_rows:
-        return False
-
-    active_month = datetime.utcnow().strftime("%B").lower()
-    active_season = _derive_active_season_from_month(active_month)
-
-    active_keywords: list[str] = []
-    for row in selection_rows:
-        keyword = (row.keyword or "").strip()
-        if not keyword:
-            continue
-        period_type = (row.period_type or "always").strip().lower()
-        period_value = (row.period_value or "").strip().lower()
-        if period_type == "always":
-            active_keywords.append(keyword)
-        elif period_type == "month" and period_value == active_month:
-            active_keywords.append(keyword)
-        elif period_type == "season" and active_season and period_value == active_season:
-            active_keywords.append(keyword)
-
-    if not active_keywords:
-        return False
-
-    haystack = " ".join([
-        _normalize_text_for_match(page.title),
-        _extract_url_slug(page.url),
-        _normalize_text_for_match(page.section),
-    ]).strip()
-    if not haystack:
-        return False
-
-    for keyword in active_keywords:
-        normalized_keyword = _normalize_text_for_match(keyword)
-        if normalized_keyword and normalized_keyword in haystack:
-            return True
-    return False
-
-
-def filter_pages_by_active_selection_keywords(pages: List[Page]) -> List[Page]:
-    """Filter pages by active selection keywords when the candidate pool uses them.
-
-    If the pool has no selection keywords configured at all, keep the original pages.
-    This preserves normal generation for sites that don't use selection keywords yet,
-    while making keyword-driven runs strict once selection rows exist.
-    """
-    has_any_selection_keywords = any(
-        (item.keyword_role or "seo").strip().lower() == "selection"
-        for page in pages
-        for item in page.keywords
-    )
-    if not has_any_selection_keywords:
-        return pages
-    return [page for page in pages if page_matches_selection_keywords(page, page.keywords)]
-
-
-def filter_boards_for_page_pool(boards: List[Board], page_ids: set[int]) -> List[Board]:
-    """Keep only boards scoped to the current candidate page pool."""
-    filtered: list[Board] = []
-    for board in boards:
-        source_page_ids = board.source_page_ids or []
-        normalized_ids = {
-            int(page_id)
-            for page_id in source_page_ids
-            if isinstance(page_id, int) or (isinstance(page_id, str) and str(page_id).isdigit())
-        }
-        if normalized_ids and (normalized_ids & page_ids):
-            filtered.append(board)
-    return filtered
+        seen.add(key)
+        keywords.append(keyword)
+    return keywords
 
 
 def generate_pin_titles(
@@ -1039,6 +973,7 @@ def generate_board_name_ai(
     language: str = "English",
     default_board: str = "General",
     website_name: str = "",
+    board_list: list[str] | None = None,
 ) -> str:
     """Generate board name using AI preset or fallback."""
     from services.ai_generation import generate_board_name
@@ -1058,6 +993,7 @@ def generate_board_name_ai(
             url=page.url,
             section=page.section or "",
             description="",
+            board_list=board_list or [],
         )
         if result:
             return sanitize_generated_text(result)
@@ -1139,33 +1075,89 @@ def _tokenize_for_board(value: str | None) -> set[str]:
     return {token for token in text.split() if len(token) > 2}
 
 
+def normalize_board_candidates(values: list[str]) -> list[str]:
+    """Normalize candidate board names while preserving order."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        candidate = sanitize_generated_text(raw)
+        if not candidate:
+            continue
+        key = candidate.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(candidate)
+    return normalized
+
+
+def extract_board_candidates(site_settings: dict | None) -> list[str]:
+    """Read board candidates from website generation settings."""
+    if not isinstance(site_settings, dict):
+        return []
+
+    ai_settings = {}
+    if isinstance(site_settings.get("ai"), dict):
+        ai_settings = site_settings.get("ai", {})
+    elif isinstance(site_settings.get("ai_settings"), dict):
+        ai_settings = site_settings.get("ai_settings", {})
+
+    candidates_raw = ai_settings.get("board_candidates")
+    if not isinstance(candidates_raw, list):
+        return []
+    return normalize_board_candidates([str(item) for item in candidates_raw])
+
+
+def _board_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
 def assign_board_name(
     page: Page,
-    boards: list[Board],
+    board_candidates: list[str],
     keywords: list[str],
+    ai_suggestion: str,
     fallback: str,
 ) -> str:
-    """Rule-based board assignment using section/title/url/keywords overlap."""
-    if not boards:
+    """Resolve final board name from allowed candidates and AI hint."""
+    if not board_candidates:
         return sanitize_generated_text(fallback)
 
-    page_tokens = set()
-    page_tokens |= _tokenize_for_board(page.title)
-    page_tokens |= _tokenize_for_board(page.section)
-    page_tokens |= _tokenize_for_board(page.url)
+    normalized_candidates = normalize_board_candidates(board_candidates)
+    if not normalized_candidates:
+        return sanitize_generated_text(fallback)
+
+    fallback_name = sanitize_generated_text(fallback) or normalized_candidates[0]
+    suggestion = sanitize_generated_text(ai_suggestion)
+    candidate_by_key = {_board_key(name): name for name in normalized_candidates}
+
+    if suggestion:
+        exact = candidate_by_key.get(_board_key(suggestion))
+        if exact:
+            return exact
+
+    page_tokens = _tokenize_for_board(page.title) | _tokenize_for_board(page.section) | _tokenize_for_board(page.url)
     for keyword in keywords:
         page_tokens |= _tokenize_for_board(keyword)
 
-    best: tuple[Board | None, int] = (None, -1)
-    for board in boards:
-        board_tokens = _tokenize_for_board(board.name) | _tokenize_for_board(board.keywords)
-        overlap = len(page_tokens & board_tokens)
-        score = overlap * 10 + board.priority
-        if score > best[1]:
-            best = (board, score)
+    suggestion_tokens = _tokenize_for_board(suggestion)
+    best_name = normalized_candidates[0]
+    best_score = -1
+    for candidate in normalized_candidates:
+        candidate_tokens = _tokenize_for_board(candidate)
+        score = len(candidate_tokens & page_tokens) * 10
+        if suggestion_tokens:
+            score += len(candidate_tokens & suggestion_tokens) * 5
+        if score > best_score:
+            best_score = score
+            best_name = candidate
 
-    chosen = best[0] or boards[0]
-    return sanitize_generated_text(chosen.name)
+    if best_score <= 0:
+        fallback_exact = candidate_by_key.get(_board_key(fallback_name))
+        if fallback_exact:
+            return fallback_exact
+
+    return best_name
 
 
 @router.post("/preview", response_model=GenerationPreviewResponse)
@@ -1185,7 +1177,9 @@ def preview_generation(
         query = query.filter(Page.website_id == request.website_id)
 
     pages = query.all()
-    pages = filter_pages_by_active_selection_keywords(pages)
+    if request.page_ids:
+        order = {page_id: idx for idx, page_id in enumerate(request.page_ids)}
+        pages.sort(key=lambda page: order.get(page.id, len(order)))
     if not pages:
         return GenerationPreviewResponse(
             pages_count=0,
@@ -1194,18 +1188,53 @@ def preview_generation(
             sample=[],
         )
 
+    seo_keywords_by_url = _load_seo_keywords_by_url(db, [page.url for page in pages])
+
     text_variations = int((request.variation_options or {}).get("text_variations", 1) or 1)
     text_variations = max(1, text_variations)
     template_image_slots = max(1, len([zone for zone in template.zones if zone.zone_type == "image"]))
 
     website_generation_settings: dict[int, dict] = {}
+    website_trend_keywords: dict[int, list[WebsiteTrendKeyword]] = {}
     website_ids = set(page.website_id for page in pages)
     if website_ids:
         websites = db.query(Website).filter(Website.id.in_(website_ids)).all()
         website_generation_settings = {w.id: (w.generation_settings or {}) for w in websites}
+        trend_rows = (
+            db.query(WebsiteTrendKeyword)
+            .filter(WebsiteTrendKeyword.website_id.in_(website_ids))
+            .all()
+        )
+        for row in trend_rows:
+            website_trend_keywords.setdefault(row.website_id, []).append(row)
+
+    pages, ranking_meta = rank_pages_for_trends(
+        pages,
+        trend_keywords_by_website=website_trend_keywords,
+        generation_settings_by_website=website_generation_settings,
+        top_n_override=request.top_n,
+        similarity_threshold_override=request.similarity_threshold,
+        diversity_enabled_override=request.diversity_enabled,
+        diversity_penalty_override=request.diversity_penalty,
+        semantic_enabled_override=request.semantic_enabled,
+        seo_keywords_by_url=seo_keywords_by_url,
+    )
+
+    if not pages:
+        return GenerationPreviewResponse(
+            pages_count=0,
+            estimated_pins=0,
+            mode=request.mode,
+            sample=[],
+        )
 
     estimated = 0
     sample: list[dict] = []
+    score_by_page_id = {
+        int(item.get("page_id")): item
+        for item in ranking_meta.get("page_scores", [])
+        if isinstance(item, dict) and item.get("page_id") is not None
+    }
     for page in pages:
         images = (
             db.query(PageImage)
@@ -1228,6 +1257,7 @@ def preview_generation(
                     "url": page.url,
                     "images_used": image_count,
                     "pins_projected": image_count * variations,
+                    "relevance_score": score_by_page_id.get(page.id, {}).get("score"),
                 }
             )
 
@@ -1287,17 +1317,37 @@ def get_generation_job(job_id: int, db: Session = Depends(get_db)):
 def list_pins(
     status: str = None,
     is_selected: bool = None,
+    website_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     """List pin drafts with optional filters."""
     query = db.query(PinDraft)
 
+    if website_id is not None:
+        website = db.query(Website).filter(Website.id == website_id).first()
+        conditions = [Page.website_id == website_id]
+
+        if website and website.url:
+            parsed = urlparse(website.url.strip())
+            if parsed.scheme and parsed.netloc:
+                domain_base = f"{parsed.scheme}://{parsed.netloc}"
+                conditions.append(PinDraft.link.like(f"{domain_base}%"))
+            else:
+                raw_base = website.url.strip().rstrip("/")
+                if raw_base:
+                    conditions.append(PinDraft.link.like(f"{raw_base}%"))
+
+        query = query.outerjoin(Page, PinDraft.page_id == Page.id).filter(or_(*conditions))
     if status:
         query = query.filter(PinDraft.status == status)
     if is_selected is not None:
         query = query.filter(PinDraft.is_selected == is_selected)
 
-    return query.order_by(PinDraft.created_at.desc()).all()
+    return query.order_by(
+        PinDraft.publish_date.is_(None).asc(),
+        PinDraft.publish_date.asc(),
+        PinDraft.created_at.desc(),
+    ).all()
 
 
 @router.get("/{pin_id}", response_model=PinDraftResponse)
@@ -1307,6 +1357,35 @@ def get_pin(pin_id: int, db: Session = Depends(get_db)):
     if not pin:
         raise HTTPException(status_code=404, detail="Pin draft not found")
     return pin
+
+
+@router.get("/{pin_id}/detail", response_model=PinDraftDetailResponse)
+def get_pin_detail(pin_id: int, db: Session = Depends(get_db)):
+    """Get detailed metadata for a specific pin draft."""
+    pin = db.query(PinDraft).filter(PinDraft.id == pin_id).first()
+    if not pin:
+        raise HTTPException(status_code=404, detail="Pin draft not found")
+
+    page = db.query(Page).filter(Page.id == pin.page_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found for this pin")
+
+    images = (
+        db.query(PageImage)
+        .filter(PageImage.page_id == pin.page_id)
+        .order_by(
+            PageImage.category.asc(),
+            PageImage.is_excluded.asc(),
+            PageImage.created_at.desc(),
+        )
+        .all()
+    )
+
+    return {
+        "pin": pin,
+        "page": page,
+        "images": images,
+    }
 
 
 @router.patch("/{pin_id}", response_model=PinDraftResponse)

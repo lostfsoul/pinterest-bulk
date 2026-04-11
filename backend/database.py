@@ -54,6 +54,10 @@ WEBSITE_MIGRATIONS = {
     "generation_settings": "ALTER TABLE websites ADD COLUMN generation_settings JSON",
 }
 
+TEMPLATE_MIGRATIONS = {
+    "template_manifest": "ALTER TABLE templates ADD COLUMN template_manifest JSON",
+}
+
 PAGE_IMAGE_MIGRATIONS = {
     "width": "ALTER TABLE page_images ADD COLUMN width INTEGER",
     "height": "ALTER TABLE page_images ADD COLUMN height INTEGER",
@@ -64,12 +68,6 @@ PAGE_IMAGE_MIGRATIONS = {
     "is_hq": "ALTER TABLE page_images ADD COLUMN is_hq BOOLEAN DEFAULT 0",
     "category": "ALTER TABLE page_images ADD COLUMN category VARCHAR(50) DEFAULT 'other'",
     "excluded_by_global_rule": "ALTER TABLE page_images ADD COLUMN excluded_by_global_rule BOOLEAN DEFAULT 0",
-}
-
-PAGE_KEYWORD_MIGRATIONS = {
-    "keyword_role": "ALTER TABLE page_keywords ADD COLUMN keyword_role VARCHAR(20) NOT NULL DEFAULT 'seo'",
-    "period_type": "ALTER TABLE page_keywords ADD COLUMN period_type VARCHAR(20) NOT NULL DEFAULT 'always'",
-    "period_value": "ALTER TABLE page_keywords ADD COLUMN period_value VARCHAR(50)",
 }
 
 GLOBAL_EXCLUDED_IMAGES_MIGRATIONS = {
@@ -101,27 +99,15 @@ SCHEDULE_SETTINGS_MIGRATIONS = {
     "warmup_month": "ALTER TABLE schedule_settings ADD COLUMN warmup_month BOOLEAN NOT NULL DEFAULT 0",
     "floating_days": "ALTER TABLE schedule_settings ADD COLUMN floating_days BOOLEAN NOT NULL DEFAULT 1",
     "max_floating_minutes": "ALTER TABLE schedule_settings ADD COLUMN max_floating_minutes INTEGER NOT NULL DEFAULT 45",
+    "timezone": "ALTER TABLE schedule_settings ADD COLUMN timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'",
 }
 
-BOARD_MIGRATIONS = {
-    "source_page_ids": "ALTER TABLE boards ADD COLUMN source_page_ids JSON",
+WEBSITE_TREND_KEYWORD_MIGRATIONS = {
+    "period_type": "ALTER TABLE website_trend_keywords ADD COLUMN period_type VARCHAR(20) NOT NULL DEFAULT 'always'",
+    "period_value": "ALTER TABLE website_trend_keywords ADD COLUMN period_value VARCHAR(50)",
+    "weight": "ALTER TABLE website_trend_keywords ADD COLUMN weight FLOAT NOT NULL DEFAULT 1.0",
+    "updated_at": "ALTER TABLE website_trend_keywords ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
 }
-
-
-def create_boards_table(conn) -> None:
-    """Create boards table if it doesn't exist."""
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS boards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            website_id INTEGER NOT NULL,
-            name VARCHAR(255) NOT NULL,
-            source_type VARCHAR(50) NOT NULL DEFAULT 'manual',
-            keywords VARCHAR(1024),
-            source_page_ids JSON,
-            priority INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """))
 
 
 def get_db():
@@ -164,6 +150,14 @@ def init_db():
             if column not in website_columns:
                 conn.execute(text(ddl))
 
+        template_columns = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(templates)"))
+        }
+        for column, ddl in TEMPLATE_MIGRATIONS.items():
+            if column not in template_columns:
+                conn.execute(text(ddl))
+
         # Migrate page_images table
         page_image_columns = {
             row[1]
@@ -173,14 +167,8 @@ def init_db():
             if column not in page_image_columns:
                 conn.execute(text(ddl))
 
-        # Migrate page_keywords table
-        page_keyword_columns = {
-            row[1]
-            for row in conn.execute(text("PRAGMA table_info(page_keywords)"))
-        }
-        for column, ddl in PAGE_KEYWORD_MIGRATIONS.items():
-            if column not in page_keyword_columns:
-                conn.execute(text(ddl))
+        create_seo_keywords_table(conn)
+        migrate_legacy_page_keywords(conn)
 
         # Create global_excluded_images table if not exists
         existing_tables = {
@@ -265,16 +253,92 @@ def init_db():
                 if column not in schedule_columns:
                     conn.execute(text(ddl))
 
-        create_boards_table(conn)
-        board_columns = {
+        create_website_trend_keywords_table(conn)
+        trend_columns = {
             row[1]
-            for row in conn.execute(text("PRAGMA table_info(boards)"))
+            for row in conn.execute(text("PRAGMA table_info(website_trend_keywords)"))
         }
-        for column, ddl in BOARD_MIGRATIONS.items():
-            if column not in board_columns:
+        for column, ddl in WEBSITE_TREND_KEYWORD_MIGRATIONS.items():
+            if column not in trend_columns:
                 conn.execute(text(ddl))
+
+        # Legacy boards table is no longer used. Keep board candidates in websites.generation_settings.ai.board_candidates.
+        conn.execute(text("DROP TABLE IF EXISTS boards"))
         create_custom_fonts_table(conn)
         backfill_custom_fonts(conn)
+
+
+def create_website_trend_keywords_table(conn) -> None:
+    """Create website_trend_keywords table if it doesn't exist."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS website_trend_keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            website_id INTEGER NOT NULL,
+            keyword VARCHAR(255) NOT NULL,
+            period_type VARCHAR(20) NOT NULL DEFAULT 'always',
+            period_value VARCHAR(50),
+            weight FLOAT NOT NULL DEFAULT 1.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+
+
+def create_seo_keywords_table(conn) -> None:
+    """Create seo_keywords table if it doesn't exist."""
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS seo_keywords (
+            url VARCHAR(2048) PRIMARY KEY,
+            keywords TEXT NOT NULL DEFAULT ''
+        )
+    """))
+
+
+def migrate_legacy_page_keywords(conn) -> None:
+    """Migrate old page_keywords rows into seo_keywords(url, keywords)."""
+    tables = {
+        row[0]
+        for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+    }
+    if "page_keywords" not in tables:
+        return
+
+    page_keyword_columns = {
+        row[1]
+        for row in conn.execute(text("PRAGMA table_info(page_keywords)"))
+    }
+    role_filter = ""
+    if "keyword_role" in page_keyword_columns:
+        role_filter = "AND LOWER(COALESCE(pk.keyword_role, 'seo')) = 'seo'"
+
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT
+                p.url AS url,
+                GROUP_CONCAT(DISTINCT TRIM(pk.keyword)) AS keywords
+            FROM page_keywords pk
+            JOIN pages p ON p.id = pk.page_id
+            WHERE TRIM(COALESCE(pk.keyword, '')) != ''
+            {role_filter}
+            GROUP BY p.url
+            """
+        )
+    ).fetchall()
+
+    for row in rows:
+        conn.execute(
+            text(
+                """
+                INSERT INTO seo_keywords (url, keywords)
+                VALUES (:url, :keywords)
+                ON CONFLICT(url) DO UPDATE SET keywords = excluded.keywords
+                """
+            ),
+            {"url": row.url, "keywords": row.keywords or ""},
+        )
+
+    conn.execute(text("DROP TABLE IF EXISTS page_keywords"))
 
 
 def create_custom_fonts_table(conn) -> None:

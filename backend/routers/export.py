@@ -9,7 +9,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urljoin, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session
 from database import get_db
 from models import PinDraft, ExportLog, ScheduleSettings, Template
 from schemas import ExportRequest, ExportResponse
-from services.pin_renderer import generate_pin_media_url
+from services.pin_renderer import RENDER_LAYOUT_VERSION, generate_pin_media_url, resolve_render_engine
 
 router = APIRouter()
 
@@ -28,6 +29,14 @@ GENERATED_PINS_DIR = Path(__file__).parent.parent.parent / "storage" / "generate
 
 MAX_PINTEREST_TITLE_LENGTH = 100
 MAX_PINTEREST_DESCRIPTION_LENGTH = 500
+
+
+def resolve_timezone(value: str | None) -> ZoneInfo:
+    timezone = (value or "").strip() or "UTC"
+    try:
+        return ZoneInfo(timezone)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
 
 
 def build_daily_slots(
@@ -105,9 +114,10 @@ def calculate_publish_dates(
     result: list[tuple[PinDraft, datetime]] = []
     url_last_used: dict[str, datetime] = {}
     sorted_pins = sorted(pins, key=lambda p: p.link or "")
-    min_days_reuse = max(31, settings.min_days_reuse)
+    min_days_reuse = max(0, settings.min_days_reuse)
+    timezone = resolve_timezone(settings.timezone)
 
-    day_pointer = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_pointer = datetime.now(tz=timezone).replace(hour=0, minute=0, second=0, microsecond=0)
     day_index = 0
     day_slots = build_daily_slots(
         day_pointer,
@@ -187,9 +197,37 @@ def _media_file_exists(media_url: str | None) -> bool:
     return bool(path and path.exists() and path.stat().st_size > 0)
 
 
+def _media_renderer_version(media_url: str | None) -> int | None:
+    if not media_url:
+        return None
+    try:
+        query = parse_qs(urlparse(media_url).query)
+        raw = (query.get("rv") or [None])[0]
+        return int(raw) if raw is not None else None
+    except Exception:
+        return None
+
+
+def _media_renderer_engine(media_url: str | None) -> str | None:
+    if not media_url:
+        return None
+    try:
+        query = parse_qs(urlparse(media_url).query)
+        raw = (query.get("re") or [None])[0]
+        if raw is None:
+            return None
+        return str(raw).strip().lower() or None
+    except Exception:
+        return None
+
+
 def _media_file_is_current(pin: PinDraft) -> bool:
     path = _media_file_path(pin.media_url)
     if not path or not path.exists() or path.stat().st_size <= 0:
+        return False
+    if _media_renderer_version(pin.media_url) != RENDER_LAYOUT_VERSION:
+        return False
+    if _media_renderer_engine(pin.media_url) != resolve_render_engine():
         return False
     if not pin.updated_at:
         return True
@@ -223,7 +261,7 @@ def _resolve_render_settings(pin: PinDraft, db: Session) -> dict:
     if not settings.get("text_align"):
         settings["text_align"] = props.get("text_align") or "left"
     if not settings.get("font_family"):
-        settings["font_family"] = props.get("font_family") or '"Bebas Neue", Impact, sans-serif'
+        settings["font_family"] = props.get("font_family") or '"Poppins", "Segoe UI", Arial, sans-serif'
     if not settings.get("custom_font_file"):
         settings["custom_font_file"] = props.get("custom_font_file")
     if not settings.get("text_zone_bg_color"):
@@ -316,6 +354,11 @@ def export_csv(
 
     # Get schedule settings
     settings = db.query(ScheduleSettings).first()
+    if not settings:
+        settings = ScheduleSettings()
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
 
     # Calculate publish dates
     pins_with_dates = calculate_publish_dates(rendered_pins, settings)
@@ -357,7 +400,7 @@ def export_csv(
 
             # Update pin status
             pin.status = "exported"
-            pin.publish_date = publish_date
+            pin.publish_date = publish_date.replace(tzinfo=None)
 
     db.commit()
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import apiClient, { AIPromptPreset, PlaceholderInfo, AIModelInfo } from '../services/api';
+import apiClient, { AIPromptPreset, PlaceholderInfo, AIModelInfo, Website } from '../services/api';
 import type { AISettings } from '../services/api';
 import { Button } from '../components/Button';
 import { PlaceholderButtons } from '../components/PlaceholderButtons';
@@ -37,12 +37,80 @@ const defaultFormData: PresetFormData = {
   is_default: false,
 };
 
+function normalizeBoardCandidates(values: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const value of values) {
+    const candidate = value.trim().replace(/\s+/g, ' ');
+    if (!candidate) continue;
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(candidate);
+  }
+  return normalized;
+}
+
+function readBoardCandidatesFromSettings(settings: Record<string, unknown>): string[] {
+  const ai =
+    settings.ai && typeof settings.ai === 'object'
+      ? settings.ai
+      : settings.ai_settings && typeof settings.ai_settings === 'object'
+        ? settings.ai_settings
+        : {};
+
+  const candidates = (ai as Record<string, unknown>).board_candidates;
+  return Array.isArray(candidates)
+    ? normalizeBoardCandidates(candidates.map((value) => String(value)))
+    : [];
+}
+
+function mergeBoardCandidatesIntoSettings(
+  settings: Record<string, unknown>,
+  boardCandidates: string[],
+): Record<string, unknown> {
+  const next = { ...settings };
+  const normalizedCandidates = normalizeBoardCandidates(boardCandidates);
+
+  const aiBase =
+    next.ai && typeof next.ai === 'object'
+      ? (next.ai as Record<string, unknown>)
+      : {};
+  next.ai = {
+    ...aiBase,
+    board_candidates: normalizedCandidates,
+  };
+
+  if (next.ai_settings && typeof next.ai_settings === 'object') {
+    next.ai_settings = {
+      ...(next.ai_settings as Record<string, unknown>),
+      board_candidates: normalizedCandidates,
+    };
+  }
+
+  return next;
+}
+
+function areBoardListsEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export default function AISettings() {
   const [presets, setPresets] = useState<AIPromptPreset[]>([]);
   const [settings, setSettings] = useState<AISettings | null>(null);
   const [placeholderInfo, setPlaceholderInfo] = useState<PlaceholderInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [models, setModels] = useState<AIModelInfo[]>([]);
+  const [websites, setWebsites] = useState<Website[]>([]);
+  const [activeWebsiteId, setActiveWebsiteId] = useState<number | null>(null);
+  const [websiteSettingsRaw, setWebsiteSettingsRaw] = useState<Record<string, unknown> | null>(null);
+  const [boardCandidates, setBoardCandidates] = useState<string[]>([]);
+  const [boardCandidateInput, setBoardCandidateInput] = useState('');
+  const [boardSaving, setBoardSaving] = useState(false);
   const [editingPreset, setEditingPreset] = useState<AIPromptPreset | null>(null);
   const [formData, setFormData] = useState<PresetFormData>(defaultFormData);
   const [saving, setSaving] = useState(false);
@@ -53,20 +121,60 @@ export default function AISettings() {
     loadData().catch(console.error);
   }, []);
 
+  useEffect(() => {
+    const onWebsiteSwitch = (event: Event) => {
+      const custom = event as CustomEvent<number>;
+      setActiveWebsiteId(custom.detail ?? null);
+    };
+    window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
+    return () => window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
+  }, []);
+
+  useEffect(() => {
+    if (!activeWebsiteId) {
+      setWebsiteSettingsRaw(null);
+      setBoardCandidates([]);
+      return;
+    }
+    void loadWebsiteBoardCandidates(activeWebsiteId);
+  }, [activeWebsiteId]);
+
   async function loadData() {
     try {
-      const [presetsRes, settingsRes, placeholdersRes, modelsRes] = await Promise.all([
+      const [presetsRes, settingsRes, placeholdersRes, modelsRes, websitesRes] = await Promise.all([
         apiClient.listAIPresets(),
         apiClient.getAISettings(),
         apiClient.getPlaceholderInfo(),
         apiClient.listAIModels(),
+        apiClient.listWebsites(),
       ]);
       setPresets(presetsRes.data);
       setSettings(settingsRes.data);
       setPlaceholderInfo(placeholdersRes.data);
       setModels(modelsRes.data.models);
+      setWebsites(websitesRes.data);
+      const stored = localStorage.getItem('active_website_id');
+      const storedId = stored ? Number(stored) : null;
+      const nextWebsiteId =
+        (storedId && websitesRes.data.some((website) => website.id === storedId) ? storedId : null) ??
+        websitesRes.data[0]?.id ??
+        null;
+      setActiveWebsiteId(nextWebsiteId);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadWebsiteBoardCandidates(websiteId: number) {
+    try {
+      const response = await apiClient.getWebsiteGenerationSettings(websiteId);
+      const nextRaw = (response.data.settings || {}) as Record<string, unknown>;
+      setWebsiteSettingsRaw(nextRaw);
+      setBoardCandidates(readBoardCandidatesFromSettings(nextRaw));
+    } catch (error) {
+      console.error('Failed to load website generation settings:', error);
+      setWebsiteSettingsRaw({});
+      setBoardCandidates([]);
     }
   }
 
@@ -126,6 +234,59 @@ export default function AISettings() {
       console.error('Failed to update settings:', error);
       alert('Failed to update settings');
     }
+  }
+
+  async function persistBoardCandidates(nextCandidates: string[]) {
+    if (!activeWebsiteId) return false;
+    setBoardSaving(true);
+    try {
+      let base = websiteSettingsRaw;
+      if (!base) {
+        const response = await apiClient.getWebsiteGenerationSettings(activeWebsiteId);
+        base = (response.data.settings || {}) as Record<string, unknown>;
+      }
+      const nextSettings = mergeBoardCandidatesIntoSettings(base || {}, nextCandidates);
+      await apiClient.updateWebsiteGenerationSettings(activeWebsiteId, nextSettings);
+      setWebsiteSettingsRaw(nextSettings);
+      setBoardCandidates(readBoardCandidatesFromSettings(nextSettings));
+      return true;
+    } catch (error) {
+      console.error('Failed to save board candidates:', error);
+      alert('Failed to save board candidates');
+      return false;
+    } finally {
+      setBoardSaving(false);
+    }
+  }
+
+  async function addBoardCandidatesFromInput() {
+    const candidates = boardCandidateInput
+      .split(/[,\n]+/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (candidates.length === 0) return;
+    const previous = boardCandidates;
+    const next = normalizeBoardCandidates([...boardCandidates, ...candidates]);
+    setBoardCandidates(next);
+    setBoardCandidateInput('');
+    if (areBoardListsEqual(previous, next)) return;
+
+    const saved = await persistBoardCandidates(next);
+    if (!saved) setBoardCandidates(previous);
+  }
+
+  async function removeBoardCandidate(candidate: string) {
+    const previous = boardCandidates;
+    const next = boardCandidates.filter((value) => value.toLowerCase() !== candidate.toLowerCase());
+    setBoardCandidates(next);
+    if (areBoardListsEqual(previous, next)) return;
+
+    const saved = await persistBoardCandidates(next);
+    if (!saved) setBoardCandidates(previous);
+  }
+
+  async function saveBoardCandidates() {
+    await persistBoardCandidates(boardCandidates);
   }
 
   function startEdit(preset: AIPromptPreset) {
@@ -257,6 +418,92 @@ export default function AISettings() {
             </select>
           </div>
         </div>
+      </div>
+
+      {/* Per-Website Board Candidates */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+        <div>
+          <h2 className="font-semibold text-gray-900">Board Candidates (Per Website)</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            AI board preset must pick from this list for the selected website. If empty, generation falls back to <strong>General</strong>.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Website</label>
+            <select
+              value={activeWebsiteId ?? ''}
+              onChange={(e) => {
+                const next = e.target.value ? Number(e.target.value) : null;
+                setActiveWebsiteId(next);
+                if (next) {
+                  localStorage.setItem('active_website_id', String(next));
+                  window.dispatchEvent(new CustomEvent<number>('website-switch', { detail: next }));
+                }
+              }}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            >
+              {websites.length === 0 && <option value="">No websites available</option>}
+              {websites.map((website) => (
+                <option key={website.id} value={website.id}>{website.name}</option>
+              ))}
+            </select>
+          </div>
+          <Button
+            variant="secondary"
+            onClick={saveBoardCandidates}
+            disabled={!activeWebsiteId || boardSaving}
+          >
+            {boardSaving ? 'Saving...' : 'Save Boards'}
+          </Button>
+        </div>
+
+        <div className="flex gap-2">
+          <textarea
+            value={boardCandidateInput}
+            onChange={(e) => setBoardCandidateInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void addBoardCandidatesFromInput();
+              }
+            }}
+            placeholder="e.g., Summer Salads, Quick Dinners, Healthy Snacks"
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-md min-h-[72px]"
+            disabled={!activeWebsiteId}
+          />
+          <Button
+            onClick={() => void addBoardCandidatesFromInput()}
+            disabled={!activeWebsiteId || boardSaving}
+          >
+            Add List
+          </Button>
+        </div>
+        <p className="text-xs text-gray-500">
+          Add one or many boards at once using comma-separated or newline-separated values. Changes are saved to DB automatically.
+        </p>
+
+        {boardCandidates.length === 0 ? (
+          <div className="text-sm text-gray-500 border border-dashed border-gray-300 rounded-md px-3 py-3">
+            No board candidates configured for this website.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {boardCandidates.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                onClick={() => void removeBoardCandidate(candidate)}
+                className="inline-flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-full text-sm hover:bg-gray-100"
+                title="Remove board"
+              >
+                <span>{candidate}</span>
+                <span className="font-bold">x</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Preset List */}

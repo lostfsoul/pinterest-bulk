@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Template, TemplateZone } from '../services/api';
 
 interface PinPreviewSettings {
@@ -22,7 +22,10 @@ interface PinPreviewProps {
   template: Template;
   imageUrls?: string[];
   title?: string;
+  link?: string;
   settings: PinPreviewSettings;
+  secondarySlotsOverride?: SecondarySlot[];
+  secondaryDefaultsOverride?: Record<string, string>;
   onZoneChange?: (zone: keyof PinPreviewSettings, value: number | string) => void;
   className?: string;
 }
@@ -30,6 +33,54 @@ interface PinPreviewProps {
 type DragMode = 'move' | 'top' | 'bottom' | 'left' | 'right' | null;
 
 const MIN_TEXT_ZONE_HEIGHT = 40;
+
+type SecondarySlot = {
+  slot_id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  enabled: boolean;
+  mask_original: boolean;
+  text_align: 'left' | 'center' | 'right';
+  font_family: string;
+  font_weight: string;
+  font_size: number;
+  text_color: string;
+  text_effect: 'none' | 'drop' | 'echo' | 'outline';
+  text_effect_color: string;
+  text_effect_offset_x: number;
+  text_effect_offset_y: number;
+  text_effect_blur: number;
+  max_lines: number;
+  uppercase: boolean;
+  default_text: string;
+  custom_font_file?: string | null;
+};
+
+const FALLBACK_SLOT: SecondarySlot = {
+  slot_id: '',
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  enabled: true,
+  mask_original: true,
+  text_align: 'center',
+  font_family: '"Poppins", "Segoe UI", Arial, sans-serif',
+  font_weight: '700',
+  font_size: 24,
+  text_color: '#000000',
+  text_effect: 'none',
+  text_effect_color: '#000000',
+  text_effect_offset_x: 2,
+  text_effect_offset_y: 2,
+  text_effect_blur: 0,
+  max_lines: 2,
+  uppercase: false,
+  default_text: '',
+  custom_font_file: null,
+};
 
 function drawCoverCenter(
   ctx: CanvasRenderingContext2D,
@@ -207,6 +258,81 @@ function normalizeFontFamily(fontFamily: string): string {
     .trim();
 }
 
+function normalizeSecondarySlots(value: unknown): SecondarySlot[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((slot): slot is Record<string, unknown> => Boolean(slot && typeof slot === 'object'))
+    .map((slot) => {
+      const textAlign = String(slot.text_align || 'center').toLowerCase();
+      const effect = String(slot.text_effect || 'none').toLowerCase();
+      return {
+        ...FALLBACK_SLOT,
+        slot_id: String(slot.slot_id || ''),
+        x: Number(slot.x || 0),
+        y: Number(slot.y || 0),
+        width: Number(slot.width || 0),
+        height: Number(slot.height || 0),
+        enabled: slot.enabled !== false,
+        mask_original: slot.mask_original !== false,
+        text_align: textAlign === 'left' || textAlign === 'right' ? textAlign : 'center',
+        font_family: String(slot.font_family || FALLBACK_SLOT.font_family),
+        font_weight: String(slot.font_weight || FALLBACK_SLOT.font_weight),
+        font_size: Number(slot.font_size || FALLBACK_SLOT.font_size),
+        text_color: String(slot.text_color || FALLBACK_SLOT.text_color),
+        text_effect: effect === 'drop' || effect === 'echo' || effect === 'outline' ? effect : 'none',
+        text_effect_color: String(slot.text_effect_color || FALLBACK_SLOT.text_effect_color),
+        text_effect_offset_x: Number(slot.text_effect_offset_x || FALLBACK_SLOT.text_effect_offset_x),
+        text_effect_offset_y: Number(slot.text_effect_offset_y || FALLBACK_SLOT.text_effect_offset_y),
+        text_effect_blur: Number(slot.text_effect_blur || FALLBACK_SLOT.text_effect_blur),
+        max_lines: Math.max(1, Number(slot.max_lines || FALLBACK_SLOT.max_lines)),
+        uppercase: Boolean(slot.uppercase),
+        default_text: String(slot.default_text || ''),
+        custom_font_file: slot.custom_font_file ? String(slot.custom_font_file) : null,
+      };
+    });
+}
+
+function normalizeSecondaryDefaults(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') return {};
+  const result: Record<string, string> = {};
+  for (const [slotId, slotValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = String(slotId || '').trim();
+    if (!key) continue;
+    result[key] = String(slotValue || '');
+  }
+  return result;
+}
+
+function resolveTemplateText(rawValue: string, link?: string): string {
+  const outbound = String(link || '').trim();
+  let domain = '';
+  if (outbound) {
+    try {
+      domain = new URL(outbound).hostname.replace(/^www\./i, '');
+    } catch (error) {
+      domain = outbound;
+    }
+  }
+  return String(rawValue || '')
+    .replace(/\{\{\s*link\s*\}\}/gi, outbound)
+    .replace(/\{\{\s*site_url\s*\}\}/gi, domain || outbound)
+    .replace(/\{\{\s*domain\s*\}\}/gi, domain || outbound)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeFontAliasPart(value: string): string {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || 'slot';
+}
+
+function primaryFontFamily(fontFamily: string): string {
+  return normalizeFontFamily(fontFamily).split(',')[0].trim();
+}
+
 function fitTitle(
   ctx: CanvasRenderingContext2D,
   text: string,
@@ -264,6 +390,128 @@ function fitTitle(
   return best;
 }
 
+function trimWithEllipsis(
+  ctx: CanvasRenderingContext2D,
+  value: string,
+  maxWidth: number,
+) {
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  if (ctx.measureText(raw).width <= maxWidth) return raw;
+  let working = raw;
+  const ellipsis = '...';
+  while (working) {
+    const candidate = `${working.trimEnd()}${ellipsis}`;
+    if (ctx.measureText(candidate).width <= maxWidth) return candidate;
+    working = working.slice(0, -1);
+  }
+  return ellipsis;
+}
+
+function wrapWords(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+): string[] {
+  const value = String(text || '').trim();
+  if (!value) return [''];
+  const words = value.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [''];
+
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const probe = current ? `${current} ${word}` : word;
+    if (!current || ctx.measureText(probe).width <= maxWidth) {
+      current = probe;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+
+  const adjusted: string[] = [];
+  for (const line of lines) {
+    if (ctx.measureText(line).width <= maxWidth) {
+      adjusted.push(line);
+      continue;
+    }
+    let chunk = '';
+    for (const char of line) {
+      const probe = `${chunk}${char}`;
+      if (chunk && ctx.measureText(probe).width > maxWidth) {
+        adjusted.push(chunk);
+        chunk = char;
+      } else {
+        chunk = probe;
+      }
+    }
+    if (chunk) adjusted.push(chunk);
+  }
+
+  if (adjusted.length > maxLines) {
+    const sliced = adjusted.slice(0, maxLines);
+    sliced[sliced.length - 1] = trimWithEllipsis(ctx, sliced[sliced.length - 1], maxWidth);
+    return sliced;
+  }
+
+  return adjusted;
+}
+
+function fitTextBlock(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  options: {
+    zoneWidth: number;
+    zoneHeight: number;
+    fontFamily: string;
+    fontWeight?: string;
+    maxLines?: number;
+    uppercase?: boolean;
+    effectOffsetX?: number;
+    effectOffsetY?: number;
+    effectBlur?: number;
+    preferredFontSize?: number;
+  },
+) {
+  const fontFamily = normalizeFontFamily(options.fontFamily);
+  const fontWeight = options.fontWeight || '900';
+  const maxLines = Math.max(1, Number(options.maxLines || 3));
+  const uppercase = Boolean(options.uppercase);
+  const effectMarginX = Math.abs(Number(options.effectOffsetX || 0));
+  const effectMarginY = Math.abs(Number(options.effectOffsetY || 0)) + Math.abs(Number(options.effectBlur || 0));
+  const source = uppercase ? safeUpperCase(text) : String(text || '').trim();
+  const usableWidth = Math.max(20, Number(options.zoneWidth || 0) - 30 - (2 * effectMarginX));
+  const usableHeight = Math.max(20, Number(options.zoneHeight || 0) - (2 * effectMarginY));
+
+  let best = { lines: [source], fontSize: 12, fontFamily, fontWeight };
+  let low = 8;
+  let high = Number.isFinite(Number(options.preferredFontSize)) && Number(options.preferredFontSize) > 0
+    ? Math.max(8, Math.min(220, Number(options.preferredFontSize)))
+    : 220;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    ctx.font = `${fontWeight} ${mid}px ${fontFamily}`.trim();
+    const lines = wrapWords(ctx, source, usableWidth, maxLines);
+    const lineHeight = mid * 1.0;
+    const totalHeight = lineHeight * lines.length;
+    const maxWidth = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
+    const fits = lines.length <= maxLines && maxWidth <= usableWidth && totalHeight <= usableHeight;
+    if (fits) {
+      best = { lines, fontSize: mid, fontFamily, fontWeight };
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  ctx.font = `${best.fontWeight} ${best.fontSize}px ${best.fontFamily}`.trim();
+  best.lines = best.lines.slice(0, maxLines).map((line) => trimWithEllipsis(ctx, line, usableWidth));
+  return best;
+}
+
 function drawTextWithEffect(
   ctx: CanvasRenderingContext2D,
   lines: string[],
@@ -311,11 +559,69 @@ function drawTextWithEffect(
   });
 }
 
+function drawTextWithEffectAtPositions(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  positions: Array<{ x: number; y: number }>,
+  style: {
+    textAlign: 'left' | 'center' | 'right';
+    textColor: string;
+    textEffect: 'none' | 'drop' | 'echo' | 'outline';
+    textEffectColor: string;
+    textEffectOffsetX: number;
+    textEffectOffsetY: number;
+    textEffectBlur: number;
+  },
+) {
+  const effect = style.textEffect || 'none';
+  const effectColor = style.textEffectColor || '#000000';
+  const offsetX = Number(style.textEffectOffsetX || 2);
+  const offsetY = Number(style.textEffectOffsetY || 2);
+  const blur = Number(style.textEffectBlur || 0);
+  const textAlign = style.textAlign || 'center';
+
+  if (effect !== 'none') {
+    ctx.save();
+    ctx.fillStyle = effectColor;
+    ctx.strokeStyle = effectColor;
+    ctx.lineJoin = 'round';
+    ctx.shadowBlur = effect === 'drop' ? blur : 0;
+    ctx.shadowColor = effectColor;
+    ctx.textAlign = textAlign;
+    lines.forEach((line, index) => {
+      const point = positions[index];
+      if (!point) return;
+      const { x, y } = point;
+      if (effect === 'drop') {
+        ctx.fillText(line, x + offsetX, y + offsetY);
+      } else if (effect === 'echo') {
+        ctx.fillText(line, x + offsetX, y + offsetY);
+        ctx.fillText(line, x - offsetX, y - offsetY);
+      } else if (effect === 'outline') {
+        ctx.lineWidth = Math.max(1, Math.abs(offsetX) || Math.abs(offsetY) || 1);
+        ctx.strokeText(line, x, y);
+      }
+    });
+    ctx.restore();
+  }
+
+  ctx.fillStyle = style.textColor || '#000000';
+  ctx.textAlign = textAlign;
+  lines.forEach((line, index) => {
+    const point = positions[index];
+    if (!point) return;
+    ctx.fillText(line, point.x, point.y);
+  });
+}
+
 export function PinPreview({
   template,
   imageUrls = [],
   title = 'Sample Recipe Title',
+  link,
   settings,
+  secondarySlotsOverride,
+  secondaryDefaultsOverride,
   onZoneChange,
   className = '',
 }: PinPreviewProps) {
@@ -335,6 +641,19 @@ export function PinPreview({
   } | null>(null);
 
   const textZone = template.zones?.find((zone) => zone.zone_type === 'text');
+  const textZoneProps = (textZone?.props || {}) as Record<string, unknown>;
+  const secondarySlots = useMemo(
+    () => normalizeSecondarySlots(secondarySlotsOverride ?? textZoneProps.secondary_text_slots),
+    [secondarySlotsOverride, textZoneProps.secondary_text_slots],
+  );
+  const secondaryDefaults = useMemo(
+    () => normalizeSecondaryDefaults(secondaryDefaultsOverride ?? textZoneProps.secondary_text_defaults),
+    [secondaryDefaultsOverride, textZoneProps.secondary_text_defaults],
+  );
+  const secondaryRenderKey = useMemo(
+    () => JSON.stringify({ secondarySlots, secondaryDefaults }),
+    [secondarySlots, secondaryDefaults],
+  );
   const borderColor = (textZone?.props?.border_color as string | undefined) || null;
   const borderWidth = Number(textZone?.props?.border_width ?? 4);
 
@@ -443,26 +762,53 @@ export function PinPreview({
 
       // Wait for fonts to be loaded before drawing text
       try {
-        if (settings.customFontFile && !loadedFontFilesRef.current.has(settings.customFontFile)) {
-          const family = normalizeFontFamily(settings.fontFamily).split(',')[0].trim();
-          if (family) {
-            try {
-              const face = new FontFace(
-                family,
-                `url(/api/templates/fonts/${encodeURIComponent(settings.customFontFile)})`,
-              );
-              await face.load();
-              document.fonts.add(face);
-              loadedFontFilesRef.current.add(settings.customFontFile);
-            } catch (fontError) {
-              console.warn('Custom font load failed:', settings.customFontFile, fontError);
-            }
+        const fontsToLoad: Array<{ file: string; family: string }> = [];
+        const mainFontAlias = `PreviewMain_${sanitizeFontAliasPart(String(template.id))}`;
+        const slotAliasById = new Map<string, string>();
+
+        if (settings.customFontFile) {
+          fontsToLoad.push({ file: settings.customFontFile, family: mainFontAlias });
+        }
+
+        secondarySlots.forEach((slot, index) => {
+          if (!slot.custom_font_file) return;
+          const slotId = String(slot.slot_id || `slot_${index + 1}`);
+          const alias = `PreviewSlot_${sanitizeFontAliasPart(String(template.id))}_${sanitizeFontAliasPart(slotId)}`;
+          slotAliasById.set(slotId, alias);
+          fontsToLoad.push({ file: slot.custom_font_file, family: alias });
+        });
+
+        for (const item of fontsToLoad) {
+          const key = `${item.file}:${item.family}`;
+          if (loadedFontFilesRef.current.has(key)) continue;
+          try {
+            const face = new FontFace(
+              item.family,
+              `url(/api/templates/fonts/${encodeURIComponent(item.file)})`,
+            );
+            await face.load();
+            document.fonts.add(face);
+            loadedFontFilesRef.current.add(key);
+          } catch (fontError) {
+            console.warn('Custom font load failed:', item.file, fontError);
           }
         }
+
         await document.fonts.ready;
-        // Try to load the specific font if it's a custom font
-        const fontToLoad = normalizedFont.split(',')[0].trim();
-        if (fontToLoad && fontToLoad !== 'sans-serif' && fontToLoad !== 'serif' && fontToLoad !== 'monospace') {
+        const familiesToWarm = new Set<string>();
+        const mainFamily = settings.customFontFile ? mainFontAlias : primaryFontFamily(normalizedFont);
+        if (mainFamily && mainFamily !== 'sans-serif' && mainFamily !== 'serif' && mainFamily !== 'monospace') {
+          familiesToWarm.add(mainFamily);
+        }
+        secondarySlots.forEach((slot) => {
+          const slotId = String(slot.slot_id || '');
+          const alias = slotAliasById.get(slotId);
+          const family = alias || primaryFontFamily(slot.font_family);
+          if (family && family !== 'sans-serif' && family !== 'serif' && family !== 'monospace') {
+            familiesToWarm.add(family);
+          }
+        });
+        for (const fontToLoad of familiesToWarm) {
           await document.fonts.load(`900 48px "${fontToLoad}"`).catch(() => {
             // Font might not be available, continue anyway
           });
@@ -476,11 +822,14 @@ export function PinPreview({
         title,
         textAreaWidth,
         settings.textZoneHeight,
-        normalizedFont,
+        settings.customFontFile ? `PreviewMain_${sanitizeFontAliasPart(String(template.id))}` : normalizedFont,
       );
       const lineHeight = fontSize;
       const centerX = settings.textZonePadLeft + textAreaWidth / 2;
-      ctx.font = `900 ${fontSize}px ${normalizedFont}`;
+      const titleFontFamily = settings.customFontFile
+        ? `PreviewMain_${sanitizeFontAliasPart(String(template.id))}`
+        : normalizedFont;
+      ctx.font = `900 ${fontSize}px ${titleFontFamily}`;
       ctx.textBaseline = 'alphabetic';
       const metrics = ctx.measureText('A');
       const capAscent = metrics.actualBoundingBoxAscent || fontSize * 0.72;
@@ -488,13 +837,80 @@ export function PinPreview({
       const visualHeight = capAscent + capDescent + (lines.length - 1) * lineHeight;
       const firstBaseline = settings.textZoneY + (settings.textZoneHeight - visualHeight) / 2 + capAscent;
 
+      // Clip title rendering to keep custom fonts/effects inside text zone.
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(settings.textZonePadLeft, settings.textZoneY, textAreaWidth, settings.textZoneHeight);
+      ctx.clip();
       drawTextWithEffect(ctx, lines, centerX, firstBaseline, lineHeight, settings);
+      ctx.restore();
+
+      // Render editable secondary slots on top of template overlay.
+      secondarySlots.forEach((slot, index) => {
+        if (!slot.enabled) return;
+        if (slot.width <= 4 || slot.height <= 4) return;
+        const defaultValue = secondaryDefaults[slot.slot_id] ?? slot.default_text ?? '';
+        const slotText = resolveTemplateText(defaultValue, link);
+        if (!slotText) return;
+
+        if (slot.mask_original) {
+          ctx.fillStyle = settings.textZoneBgColor || '#ffffff';
+          ctx.fillRect(slot.x, slot.y, slot.width, slot.height);
+        }
+
+        const slotId = String(slot.slot_id || `slot_${index + 1}`);
+        const slotCustomAlias = slot.custom_font_file
+          ? `PreviewSlot_${sanitizeFontAliasPart(String(template.id))}_${sanitizeFontAliasPart(slotId)}`
+          : null;
+        const slotFamily = slotCustomAlias || normalizeFontFamily(slot.font_family);
+        const fitted = fitTextBlock(ctx, slotText, {
+          zoneWidth: slot.width,
+          zoneHeight: slot.height,
+          fontFamily: slotFamily,
+          fontWeight: slot.font_weight || '700',
+          maxLines: slot.max_lines || 2,
+          uppercase: slot.uppercase,
+          effectOffsetX: slot.text_effect_offset_x,
+          effectOffsetY: slot.text_effect_offset_y,
+          effectBlur: slot.text_effect_blur,
+          preferredFontSize: slot.font_size,
+        });
+        const align = slot.text_align === 'left' || slot.text_align === 'right' ? slot.text_align : 'center';
+        ctx.font = `${slot.font_weight || '700'} ${fitted.fontSize}px ${slotFamily}`.trim();
+        ctx.textBaseline = 'alphabetic';
+        ctx.textAlign = align;
+        const lineH = fitted.fontSize * 1.0;
+        const m = ctx.measureText('A');
+        const slotCapAscent = m.actualBoundingBoxAscent || fitted.fontSize * 0.72;
+        const slotCapDescent = m.actualBoundingBoxDescent || 0;
+        const slotVisualH = slotCapAscent + slotCapDescent + (fitted.lines.length - 1) * lineH;
+        const firstSlotBaseline = slot.y + (slot.height - slotVisualH) / 2 + slotCapAscent;
+        const positions = fitted.lines.map((_, index) => ({
+          x: align === 'left' ? slot.x + 15 : align === 'right' ? slot.x + slot.width - 15 : slot.x + slot.width / 2,
+          y: firstSlotBaseline + (index * lineH),
+        }));
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(slot.x, slot.y, slot.width, slot.height);
+        ctx.clip();
+        drawTextWithEffectAtPositions(ctx, fitted.lines, positions, {
+          textAlign: align,
+          textColor: slot.text_color || '#000000',
+          textEffect: slot.text_effect || 'none',
+          textEffectColor: slot.text_effect_color || '#000000',
+          textEffectOffsetX: slot.text_effect_offset_x || 2,
+          textEffectOffsetY: slot.text_effect_offset_y || 2,
+          textEffectBlur: slot.text_effect_blur || 0,
+        });
+        ctx.restore();
+      });
     };
 
     render().catch((error) => {
       console.error('Failed to render preview:', error);
     });
-  }, [borderColor, borderWidth, imageUrls, loading, settings.customFontFile, settings.fontFamily, settings.textAlign, settings.textColor, settings.textEffect, settings.textEffectColor, settings.textEffectOffsetX, settings.textEffectOffsetY, settings.textEffectBlur, settings.textZoneBgColor, settings.textZoneHeight, settings.textZonePadLeft, settings.textZonePadRight, settings.textZoneY, template, templateSvg, title]);
+  }, [borderColor, borderWidth, imageUrls, link, loading, secondaryRenderKey, settings.customFontFile, settings.fontFamily, settings.textAlign, settings.textColor, settings.textEffect, settings.textEffectColor, settings.textEffectOffsetX, settings.textEffectOffsetY, settings.textEffectBlur, settings.textZoneBgColor, settings.textZoneHeight, settings.textZonePadLeft, settings.textZonePadRight, settings.textZoneY, template, templateSvg, title]);
 
   useEffect(() => {
     if (!onZoneChange) return undefined;

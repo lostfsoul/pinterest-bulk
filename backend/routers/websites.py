@@ -1,13 +1,14 @@
 """
 Website management router.
 """
+import re
 from typing import List
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Website, Page
+from models import Website, Page, WebsiteTrendKeyword
 from schemas import (
     WebsiteCreate,
     WebsiteUpdate,
@@ -21,10 +22,69 @@ from schemas import (
     SitemapImportResponse,
     WebsiteGenerationSettingsResponse,
     WebsiteGenerationSettingsUpdate,
+    TrendKeywordCreate,
+    TrendKeywordUpdate,
+    TrendKeywordResponse,
 )
 from services.sitemap import import_sitemap, fetch_sitemap_groups
 
 router = APIRouter()
+
+MONTH_ALIASES = {
+    "1": "january",
+    "01": "january",
+    "january": "january",
+    "jan": "january",
+    "2": "february",
+    "02": "february",
+    "february": "february",
+    "feb": "february",
+    "3": "march",
+    "03": "march",
+    "march": "march",
+    "mar": "march",
+    "4": "april",
+    "04": "april",
+    "april": "april",
+    "apr": "april",
+    "5": "may",
+    "05": "may",
+    "may": "may",
+    "6": "june",
+    "06": "june",
+    "june": "june",
+    "jun": "june",
+    "7": "july",
+    "07": "july",
+    "july": "july",
+    "jul": "july",
+    "8": "august",
+    "08": "august",
+    "august": "august",
+    "aug": "august",
+    "9": "september",
+    "09": "september",
+    "september": "september",
+    "sep": "september",
+    "sept": "september",
+    "10": "october",
+    "october": "october",
+    "oct": "october",
+    "11": "november",
+    "november": "november",
+    "nov": "november",
+    "12": "december",
+    "december": "december",
+    "dec": "december",
+}
+
+SEASON_ALIASES = {
+    "spring": "spring",
+    "summer": "summer",
+    "autumn": "autumn",
+    "fall": "autumn",
+    "winter": "winter",
+}
 
 
 def _normalize_website_url(raw: str | None) -> str | None:
@@ -51,6 +111,27 @@ def _normalize_sitemap_url(raw: str | None) -> str | None:
         raise HTTPException(status_code=400, detail="Invalid sitemap URL")
     path = parsed.path or "/"
     return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _normalize_trend_period(period_type: str, period_value: str | None) -> tuple[str, str | None]:
+    normalized_type = (period_type or "always").strip().lower()
+    if normalized_type not in {"always", "month", "season"}:
+        raise HTTPException(status_code=400, detail="period_type must be one of: always, month, season")
+    if normalized_type == "always":
+        return "always", None
+
+    value = re.sub(r"\s+", " ", (period_value or "").strip().lower())
+    if not value:
+        raise HTTPException(status_code=400, detail="period_value is required for month/season")
+    if normalized_type == "month":
+        mapped = MONTH_ALIASES.get(value)
+        if not mapped:
+            raise HTTPException(status_code=400, detail=f"Unsupported month value: {period_value}")
+        return "month", mapped
+    mapped = SEASON_ALIASES.get(value)
+    if not mapped:
+        raise HTTPException(status_code=400, detail=f"Unsupported season value: {period_value}")
+    return "season", mapped
 
 
 def _derive_sitemap_url(website_url: str, sitemap_url: str | None) -> str:
@@ -218,23 +299,85 @@ def get_generation_settings(website_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Website not found")
 
     defaults = {
+        "preview_page_id": None,
+        "ai": {
+            "generate_titles": True,
+            "generate_descriptions": True,
+            "variants": 1,
+            "tone": "seo-friendly",
+            "keyword_mode": "auto",
+            "manual_keywords": "",
+            "cta_style": "soft",
+            "language": "English",
+            "title_max": 100,
+            "description_max": 500,
+            "board_candidates": [],
+        },
+        "design": {
+            "template_ids": [],
+            "font_choices": ["Poppins"],
+            "palette_mode": "auto",
+            "brand_palette": {
+                "background": "#ffffff",
+                "text": "#000000",
+                "effect": "#000000",
+            },
+            "manual_palette": {
+                "background": "#ffffff",
+                "text": "#000000",
+                "effect": "#000000",
+            },
+        },
+        "image": {
+            "fetch_from_page": True,
+            "ignore_small_width": True,
+            "min_width": 200,
+            "ignore_small_height": False,
+            "min_height": 200,
+            "orientations": ["portrait", "square", "landscape"],
+            "fetch_featured": True,
+            "use_same_image_once": True,
+            "match_palettes_to_images": False,
+            "ignore_images_with_text": False,
+            "show_full_image": False,
+        },
+        "generation": {
+            "daily_pin_count": 5,
+            "warmup_month": False,
+            "floating_days": True,
+            "randomize_posting_times": True,
+            "max_floating_minutes": 45,
+            "advanced_scheduling": False,
+            "timezone": "UTC",
+            "start_hour": 8,
+            "end_hour": 20,
+        },
+        "content": {
+            "desired_gap_days": 31,
+            "lifetime_limit_enabled": False,
+            "lifetime_limit_count": 0,
+            "monthly_limit_enabled": False,
+            "monthly_limit_count": 0,
+            "no_link_pins": False,
+        },
+        "trend": {
+            "enabled": True,
+            "top_n": 0,
+            "similarity_threshold": 0.0,
+            "diversity_enabled": False,
+            "diversity_penalty": 0.15,
+            "semantic_enabled": False,
+        },
+        # Legacy keys kept for backward compatibility.
         "image_settings": {
-            "use_hidden_images": True,
-            "ignore_small_images": True,
+            "ignore_small_width": True,
+            "ignore_small_height": False,
             "min_width": 200,
             "min_height": 200,
             "allowed_orientations": ["portrait", "square", "landscape"],
-            "max_images_per_page": 1,
-            "featured_only": False,
         },
-        "ai_settings": {
-            "enabled": True,
-            "text_variations": 1,
-        },
-        "design_settings": {
-            "template_ids": [],
-            "color_palette": "default",
-        },
+        "ai_settings": {"enabled": True, "text_variations": 1},
+        "design_settings": {"template_ids": [], "color_palette": "default"},
     }
     return WebsiteGenerationSettingsResponse(
         website_id=website.id,
@@ -260,6 +403,105 @@ def update_generation_settings(
         website_id=website.id,
         settings=website.generation_settings or {},
     )
+
+
+@router.get("/{website_id}/trend-keywords", response_model=List[TrendKeywordResponse])
+def list_trend_keywords(website_id: int, db: Session = Depends(get_db)):
+    """List website-level trend keywords used for page ranking."""
+    website = db.query(Website).filter(Website.id == website_id).first()
+    if not website:
+        raise HTTPException(status_code=404, detail="Website not found")
+
+    return (
+        db.query(WebsiteTrendKeyword)
+        .filter(WebsiteTrendKeyword.website_id == website_id)
+        .order_by(WebsiteTrendKeyword.created_at.desc(), WebsiteTrendKeyword.id.desc())
+        .all()
+    )
+
+
+@router.post("/{website_id}/trend-keywords", response_model=TrendKeywordResponse, status_code=status.HTTP_201_CREATED)
+def create_trend_keyword(
+    website_id: int,
+    payload: TrendKeywordCreate,
+    db: Session = Depends(get_db),
+):
+    """Create a trend keyword for website ranking."""
+    website = db.query(Website).filter(Website.id == website_id).first()
+    if not website:
+        raise HTTPException(status_code=404, detail="Website not found")
+
+    period_type, period_value = _normalize_trend_period(payload.period_type, payload.period_value)
+    keyword = payload.keyword.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword cannot be empty")
+
+    row = WebsiteTrendKeyword(
+        website_id=website_id,
+        keyword=keyword,
+        period_type=period_type,
+        period_value=period_value,
+        weight=float(payload.weight),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.patch("/{website_id}/trend-keywords/{trend_keyword_id}", response_model=TrendKeywordResponse)
+def update_trend_keyword(
+    website_id: int,
+    trend_keyword_id: int,
+    payload: TrendKeywordUpdate,
+    db: Session = Depends(get_db),
+):
+    """Update a website trend keyword."""
+    row = (
+        db.query(WebsiteTrendKeyword)
+        .filter(WebsiteTrendKeyword.id == trend_keyword_id, WebsiteTrendKeyword.website_id == website_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Trend keyword not found")
+
+    if payload.keyword is not None:
+        keyword = payload.keyword.strip()
+        if not keyword:
+            raise HTTPException(status_code=400, detail="keyword cannot be empty")
+        row.keyword = keyword
+
+    period_type_input = payload.period_type if payload.period_type is not None else row.period_type
+    period_value_input = payload.period_value if (payload.period_type is not None or payload.period_value is not None) else row.period_value
+    period_type, period_value = _normalize_trend_period(period_type_input, period_value_input)
+    row.period_type = period_type
+    row.period_value = period_value
+
+    if payload.weight is not None:
+        row.weight = float(payload.weight)
+
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/{website_id}/trend-keywords/{trend_keyword_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_trend_keyword(
+    website_id: int,
+    trend_keyword_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete a trend keyword from website ranking inputs."""
+    row = (
+        db.query(WebsiteTrendKeyword)
+        .filter(WebsiteTrendKeyword.id == trend_keyword_id, WebsiteTrendKeyword.website_id == website_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Trend keyword not found")
+    db.delete(row)
+    db.commit()
+    return None
 
 
 @router.get("/pages/all", response_model=List[PageResponse])

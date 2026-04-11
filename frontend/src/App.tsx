@@ -5,7 +5,6 @@ import apiClient, { GenerationJob, Website } from './services/api';
 import { Button } from './components/Button';
 
 // Lazy load pages
-const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Websites = lazy(() => import('./pages/Websites'));
 const WebsiteDetail = lazy(() => import('./pages/WebsiteDetail'));
 const Generate = lazy(() => import('./pages/Generate'));
@@ -68,6 +67,7 @@ function Layout({
   const navigate = useNavigate();
   const [websites, setWebsites] = useState<Website[]>([]);
   const [activeWebsiteId, setActiveWebsiteId] = useState<number | ''>('');
+  const [activeWebsiteHasPins, setActiveWebsiteHasPins] = useState(false);
   const [activeGenerationJob, setActiveGenerationJob] = useState<GenerationJob | null>(null);
   const [activeGenerationJobId, setActiveGenerationJobId] = useState<number | null>(() => {
     const stored = localStorage.getItem('active_generation_job_id');
@@ -104,6 +104,31 @@ function Layout({
     window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
     return () => window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
   }, []);
+
+  useEffect(() => {
+    if (!activeWebsiteId) {
+      setActiveWebsiteHasPins(false);
+      return;
+    }
+
+    let cancelled = false;
+    void apiClient.listPins({ website_id: Number(activeWebsiteId) })
+      .then((response) => {
+        if (!cancelled) {
+          setActiveWebsiteHasPins(response.data.length > 0);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Failed to load website pin mode in layout:', error);
+          setActiveWebsiteHasPins(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWebsiteId]);
 
   useEffect(() => {
     const onGenerationJobChange = (event: Event) => {
@@ -180,6 +205,7 @@ function Layout({
   const activeWebsiteDomain = activeWebsite?.url
     ? activeWebsite.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : '';
+  const workflowLabel = activeWebsiteHasPins ? 'Calendar' : 'Onboarding';
 
   const generationBannerTitle =
     activeGenerationJob?.status === 'completed'
@@ -232,8 +258,7 @@ function Layout({
             </div>
 
             <nav className="flex-1 space-y-1">
-              <NavItem to="/generate" onClick={() => setSidebarOpen(false)}>Onboarding</NavItem>
-              <NavItem to="/" onClick={() => setSidebarOpen(false)}>Analytics</NavItem>
+              <NavItem to="/generate" onClick={() => setSidebarOpen(false)}>{workflowLabel}</NavItem>
               <NavItem to="/export" onClick={() => setSidebarOpen(false)}>Export</NavItem>
               <NavItem to="/websites" onClick={() => setSidebarOpen(false)}>Websites</NavItem>
               <NavItem to="/settings" onClick={() => setSidebarOpen(false)}>Settings</NavItem>
@@ -260,8 +285,7 @@ function Layout({
         </div>
 
         <nav className="flex-1 space-y-1">
-          <NavItem to="/generate">Onboarding</NavItem>
-          <NavItem to="/">Analytics</NavItem>
+          <NavItem to="/generate">{workflowLabel}</NavItem>
           <NavItem to="/export">Export</NavItem>
           <NavItem to="/websites">Websites</NavItem>
           <NavItem to="/settings">Settings</NavItem>
@@ -317,7 +341,7 @@ function Layout({
                 </div>
                 <div
                   className="min-w-0 truncate text-lg font-black leading-none text-black"
-                  style={{ fontFamily: "'Montserrat', 'JetBrains Mono', sans-serif" }}
+                  style={{ fontFamily: "'Poppins', 'Segoe UI', sans-serif" }}
                 >
                   {activeWebsiteDomain || activeWebsiteLabel}
                 </div>
@@ -435,7 +459,7 @@ function App() {
     <BrowserRouter>
       <Layout onLogout={handleLogout} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<Navigate to="/generate" replace />} />
           <Route path="/websites" element={<Websites />} />
           <Route path="/websites/:id" element={<WebsiteDetail />} />
           <Route path="/generate" element={<Generate />} />
@@ -446,7 +470,7 @@ function App() {
           <Route path="/templates" element={<Navigate to="/settings" replace />} />
           <Route path="/images" element={<Navigate to="/generate" replace />} />
           <Route path="/schedule" element={<Navigate to="/generate" replace />} />
-          <Route path="/activity" element={<Navigate to="/" replace />} />
+          <Route path="/activity" element={<Navigate to="/generate" replace />} />
         </Routes>
       </Layout>
     </BrowserRouter>

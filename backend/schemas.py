@@ -88,40 +88,26 @@ class KeywordRow(BaseModel):
     """Single keyword row from CSV."""
     url: str
     keywords: str
-    period_type: Literal["always", "month", "season"] = "always"
-    period_value: str | None = None
 
 
 class KeywordStatusResponse(BaseModel):
-    """Keyword status with period breakdown."""
+    """Keyword status."""
     total_pages: int
     pages_with_keywords: int
     total_keywords: int
     coverage_percent: float
-    by_period_type: dict[str, int]
-    by_role: dict[str, int] | None = None
 
 
 class KeywordEntryResponse(BaseModel):
-    """Single keyword entry with page metadata."""
-    id: int
-    page_id: int
-    website_id: int
-    website_name: str
-    page_title: str | None
-    page_url: str
-    keyword: str
-    keyword_role: Literal["selection", "seo"]
-    period_type: Literal["always", "month", "season"]
-    period_value: str | None
+    """Single URL-level SEO keyword entry."""
+    url: str
+    keywords: str
 
 
 class KeywordEntryUpdate(BaseModel):
-    """Update keyword entry."""
-    keyword: str
-    keyword_role: Literal["selection", "seo"] = "seo"
-    period_type: Literal["always", "month", "season"] = "always"
-    period_value: str | None = None
+    """Update URL-level SEO keywords."""
+    url: str
+    keywords: str
 
 
 # =============================================================================
@@ -147,6 +133,7 @@ class TemplateResponse(BaseModel):
     id: int
     name: str
     filename: str
+    template_manifest: dict[str, Any] | None = None
     width: int
     height: int
     created_at: datetime
@@ -158,6 +145,29 @@ class TemplateResponse(BaseModel):
 class TemplateWithZones(TemplateResponse):
     """Template with its zones."""
     zones: list[TemplateZoneResponse]
+
+
+class TemplateManifestUpdate(BaseModel):
+    """Persisted template SVG + manifest payload."""
+    svg_content: str
+    template_manifest: dict[str, Any]
+
+
+class TemplateDetectionStartRequest(BaseModel):
+    """Request payload for template detection pre-pass."""
+    max_regions: int = Field(default=10, ge=1, le=30)
+
+
+class TemplateOCRResult(BaseModel):
+    """Single OCR result row keyed by candidate id."""
+    candidate_id: str
+    text: str = ""
+    confidence: float = 0.0
+
+
+class TemplateDetectionFinalizeRequest(BaseModel):
+    """Finalize detected zones using optional OCR results."""
+    ocr_results: list[TemplateOCRResult] = Field(default_factory=list)
 
 
 # =============================================================================
@@ -330,6 +340,13 @@ class PinDraftResponse(BaseModel):
         from_attributes = True
 
 
+class PinDraftDetailResponse(BaseModel):
+    """Detailed pin draft response used by calendar detail view."""
+    pin: PinDraftResponse
+    page: PageResponse
+    images: list[PageImageResponse]
+
+
 class PinDraftUpdate(BaseModel):
     """Schema for updating pin draft."""
     title: str | None = None
@@ -395,6 +412,11 @@ class PinGenerateRequest(BaseModel):
     language: str | None = None
     mode: Literal["conservative", "matrix"] = "conservative"
     variation_options: dict[str, int | bool] | None = None
+    top_n: int | None = Field(default=None, ge=1, le=2000)
+    similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    diversity_enabled: bool | None = None
+    diversity_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    semantic_enabled: bool | None = None
 
 
 class GenerationPreviewRequest(BaseModel):
@@ -404,6 +426,11 @@ class GenerationPreviewRequest(BaseModel):
     website_id: int | None = None
     mode: Literal["conservative", "matrix"] = "conservative"
     variation_options: dict[str, int | bool] | None = None
+    top_n: int | None = Field(default=None, ge=1, le=2000)
+    similarity_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    diversity_enabled: bool | None = None
+    diversity_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    semantic_enabled: bool | None = None
 
 
 class GenerationPreviewResponse(BaseModel):
@@ -425,6 +452,7 @@ class ScheduleSettingsResponse(BaseModel):
     start_hour: int
     end_hour: int
     min_days_reuse: int
+    timezone: str
     random_minutes: bool
     warmup_month: bool
     floating_days: bool
@@ -440,7 +468,8 @@ class ScheduleSettingsUpdate(BaseModel):
     pins_per_day: int = Field(ge=1, le=100)
     start_hour: int = Field(ge=0, le=23)
     end_hour: int = Field(ge=0, le=23)
-    min_days_reuse: int = Field(ge=31, le=365)
+    min_days_reuse: int = Field(ge=0, le=365)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
     random_minutes: bool
     warmup_month: bool = False
     floating_days: bool = True
@@ -489,51 +518,40 @@ class WebsiteGenerationSettingsUpdate(BaseModel):
     settings: dict[str, Any]
 
 
-class BoardResponse(BaseModel):
-    """Board entry for generation/export."""
+class TrendKeywordBase(BaseModel):
+    """Base schema for persisted trend keywords."""
+    keyword: str = Field(..., min_length=1, max_length=255)
+    period_type: Literal["always", "month", "season"] = "always"
+    period_value: str | None = None
+    weight: float = Field(default=1.0, ge=0.0, le=10.0)
+
+
+class TrendKeywordCreate(TrendKeywordBase):
+    """Create a trend keyword."""
+    pass
+
+
+class TrendKeywordUpdate(BaseModel):
+    """Update an existing trend keyword."""
+    keyword: str | None = Field(default=None, min_length=1, max_length=255)
+    period_type: Literal["always", "month", "season"] | None = None
+    period_value: str | None = None
+    weight: float | None = Field(default=None, ge=0.0, le=10.0)
+
+
+class TrendKeywordResponse(BaseModel):
+    """Trend keyword entry."""
     id: int
     website_id: int
-    name: str
-    source_type: str
-    keywords: str | None
-    source_page_ids: list[int] | None = None
-    priority: int
+    keyword: str
+    period_type: str
+    period_value: str | None
+    weight: float
     created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
-
-
-class BoardCreate(BaseModel):
-    """Create board entry."""
-    website_id: int
-    name: str = Field(..., min_length=1, max_length=255)
-    source_type: Literal["manual", "ai"] = "manual"
-    keywords: str | None = None
-    source_page_ids: list[int] | None = None
-    priority: int = 0
-
-
-class BoardUpdate(BaseModel):
-    """Update board entry."""
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    keywords: str | None = None
-    source_page_ids: list[int] | None = None
-    priority: int | None = None
-
-
-class BoardSuggestRequest(BaseModel):
-    """Request AI-like board suggestions."""
-    website_id: int
-    count: int = Field(default=5, ge=1, le=20)
-    page_ids: list[int] | None = None
-
-
-class BoardSuggestResponse(BaseModel):
-    """Suggested board names."""
-    website_id: int
-    page_ids_used: list[int]
-    suggestions: list[str]
 
 
 # =============================================================================
@@ -551,56 +569,6 @@ class ExportResponse(BaseModel):
     pins_count: int
     file_path: str
     download_url: str
-
-
-# =============================================================================
-# Analytics Schemas
-# =============================================================================
-
-class ImportLogResponse(BaseModel):
-    """Schema for import log response."""
-    id: int
-    type: str
-    website_id: int | None
-    items_count: int
-    success_count: int
-    error_count: int
-    details: dict | None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class ExportLogResponse(BaseModel):
-    """Schema for export log response."""
-    id: int
-    pins_count: int
-    file_path: str
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class AnalyticsSummary(BaseModel):
-    """Summary statistics for analytics."""
-    websites: int
-    pages: int
-    enabled_pages: int
-    keywords: int
-    pages_with_keywords: int
-    templates: int
-    images_total: int
-    images_excluded: int
-    images_available: int
-    pins_total: int
-    pins_draft: int
-    pins_ready: int
-    pins_exported: int
-    pins_skipped: int
-    exports_count: int
-    exports_pins_total: int
 
 
 # =============================================================================

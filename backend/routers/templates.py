@@ -1,112 +1,206 @@
-"""
-Template management router for SVG uploads.
-"""
+"""Template management router (detection-first SVG pipeline)."""
+
+from __future__ import annotations
+
+import logging
 import re
-import shutil
 import uuid
 from pathlib import Path
-from typing import List, Optional
-from datetime import datetime
-from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status, Request
-from fastapi.responses import FileResponse
+from typing import Any
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Template, TemplateZone, CustomFont
-from schemas import TemplateResponse, TemplateWithZones, TemplateZoneResponse
+from models import CustomFont, Template, TemplateZone
+from schemas import (
+    TemplateDetectionFinalizeRequest,
+    TemplateDetectionStartRequest,
+    TemplateManifestUpdate,
+    TemplateResponse,
+    TemplateWithZones,
+    TemplateZoneResponse,
+)
+from services.template_detection import (
+    build_manifest_v2,
+    migrate_manifest_to_v2,
+    normalize_manifest_v2,
+    parse_ocr_results,
+    parse_svg_structure,
+    project_manifest_v2_to_legacy_zones,
+    render_candidate_crops,
+)
 from services.template_parser import parse_svg_template
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Storage directories
 STORAGE_DIR = Path(__file__).parent.parent.parent / "storage" / "templates"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 FONT_DIR = Path(__file__).parent.parent.parent / "storage" / "fonts"
 FONT_DIR.mkdir(parents=True, exist_ok=True)
-
 OVERLAYS_DIR = Path(__file__).parent.parent.parent / "storage" / "overlays"
 OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
 
-TARGET_TEMPLATE_WIDTH = 750
-TARGET_TEMPLATE_HEIGHT = 1575
+
+def _read_template_svg(template: Template) -> str:
+    path = STORAGE_DIR / template.filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Template file not found")
+    return path.read_text(encoding="utf-8")
 
 
-def _scaled_template_zone_data(parsed: dict) -> tuple[float, float]:
-    scale_x = TARGET_TEMPLATE_WIDTH / parsed["width"] if parsed["width"] else 1.0
-    scale_y = TARGET_TEMPLATE_HEIGHT / parsed["height"] if parsed["height"] else 1.0
-    return scale_x, scale_y
+def _write_template_svg(template: Template, svg_content: str) -> None:
+    path = STORAGE_DIR / template.filename
+    path.write_text(svg_content, encoding="utf-8")
 
 
-def _replace_template_zones(template: Template, parsed: dict, db: Session) -> None:
-    scale_x, scale_y = _scaled_template_zone_data(parsed)
-    text_zone = next((zone for zone in template.zones if zone.zone_type == "text"), None)
-    text_props = dict(text_zone.props or {}) if text_zone else {}
+def _write_overlay_svg(template: Template, svg_content: str) -> None:
+    overlay_filename = template.overlay_svg or f"{Path(template.filename).stem}_overlay.svg"
+    overlay_path = OVERLAYS_DIR / overlay_filename
+    stripped_svg = svg_content
+    try:
+        parsed = parse_svg_template(svg_content)
+        stripped_svg = str(parsed.get("stripped_svg") or svg_content)
+    except Exception as exc:
+        logger.warning("Overlay parse fallback for template %s: %s", template.id, exc)
+    overlay_path.write_text(stripped_svg, encoding="utf-8")
+    template.overlay_svg = overlay_filename
+
+
+def _replace_template_zones_from_manifest(template: Template, manifest: dict[str, Any], db: Session) -> None:
+    projected = project_manifest_v2_to_legacy_zones(manifest)
+    image_zones = projected.get("image_zones") if isinstance(projected.get("image_zones"), list) else []
+    text_zone = projected.get("text_zone") if isinstance(projected.get("text_zone"), dict) else {}
 
     for zone in list(template.zones):
         db.delete(zone)
     db.flush()
 
-    for index, zone in enumerate(parsed["zones"]):
+    for index, zone in enumerate(image_zones):
+        if not isinstance(zone, dict):
+            continue
         db.add(
             TemplateZone(
                 template_id=template.id,
                 zone_type="image",
-                x=int(round(zone["x"] * scale_x)),
-                y=int(round(zone["y"] * scale_y)),
-                width=int(round(zone["width"] * scale_x)),
-                height=int(round(zone["height"] * scale_y)),
-                props={"zone_index": index},
+                x=int(zone.get("x") or 0),
+                y=int(zone.get("y") or 0),
+                width=max(1, int(zone.get("width") or 1)),
+                height=max(1, int(zone.get("height") or 1)),
+                props={"zone_index": int(zone.get("zone_index") or index)},
             )
         )
 
-    db.add(
-        TemplateZone(
-            template_id=template.id,
-            zone_type="text",
-            x=int(round(parsed["text_zone_x"] * scale_x)),
-            y=int(round(parsed["text_zone_y"] * scale_y)),
-            width=int(round(parsed["text_zone_width"] * scale_x)),
-            height=int(round(parsed["text_zone_height"] * scale_y)),
-            props={
-                "border_color": parsed["text_zone_border_color"],
-                "border_width": parsed["text_zone_border_width"],
-                "text_color": text_props.get("text_color") or parsed["text_zone_text_color"],
-                "text_align": text_props.get("text_align") or parsed.get("text_zone_align") or "left",
-                "font_family": text_props.get("font_family") or '"Bebas Neue", Impact, sans-serif',
-                "text_effect": text_props.get("text_effect") or "none",
-                "text_effect_color": text_props.get("text_effect_color") or "#000000",
-                "text_effect_offset_x": text_props.get("text_effect_offset_x", 2),
-                "text_effect_offset_y": text_props.get("text_effect_offset_y", 2),
-                "text_effect_blur": text_props.get("text_effect_blur", 0),
-                "custom_font_file": text_props.get("custom_font_file"),
-            },
+    if text_zone:
+        props = text_zone.get("props") if isinstance(text_zone.get("props"), dict) else {}
+        db.add(
+            TemplateZone(
+                template_id=template.id,
+                zone_type="text",
+                x=int(text_zone.get("x") or 0),
+                y=int(text_zone.get("y") or 0),
+                width=max(1, int(text_zone.get("width") or template.width or 1)),
+                height=max(1, int(text_zone.get("height") or max(1, int(template.height * 0.12)) or 1)),
+                props=props,
+            )
         )
-    )
 
 
-def _refresh_template_zones_if_stale(template: Template, db: Session) -> bool:
-    template_path = STORAGE_DIR / template.filename
-    if not template_path.exists():
-        return False
+def _zones_need_refresh(template: Template, manifest: dict[str, Any]) -> bool:
+    projected = project_manifest_v2_to_legacy_zones(manifest)
+    image_zones = projected.get("image_zones") if isinstance(projected.get("image_zones"), list) else []
+    text_zone = projected.get("text_zone") if isinstance(projected.get("text_zone"), dict) else {}
 
-    parsed = parse_svg_template(template_path.read_text(encoding="utf-8"))
-    stored_image_zones = [zone for zone in template.zones if zone.zone_type == "image"]
-    if len(stored_image_zones) == len(parsed["zones"]):
-        return False
+    stored_images = [zone for zone in template.zones if zone.zone_type == "image"]
+    stored_text = next((zone for zone in template.zones if zone.zone_type == "text"), None)
 
-    _replace_template_zones(template, parsed, db)
-    db.commit()
-    db.refresh(template)
-    return True
+    if len(stored_images) != len(image_zones):
+        return True
+    if bool(stored_text) != bool(text_zone):
+        return True
+
+    if stored_text and text_zone:
+        if (
+            stored_text.x != int(text_zone.get("x") or 0)
+            or stored_text.y != int(text_zone.get("y") or 0)
+            or stored_text.width != max(1, int(text_zone.get("width") or 1))
+            or stored_text.height != max(1, int(text_zone.get("height") or 1))
+        ):
+            return True
+
+        expected_secondary = []
+        props = text_zone.get("props") if isinstance(text_zone.get("props"), dict) else {}
+        if isinstance(props.get("secondary_text_slots"), list):
+            expected_secondary = props.get("secondary_text_slots")
+        current_secondary = []
+        if isinstance(stored_text.props, dict) and isinstance(stored_text.props.get("secondary_text_slots"), list):
+            current_secondary = stored_text.props.get("secondary_text_slots")
+        if len(current_secondary) != len(expected_secondary):
+            return True
+
+    return False
 
 
-@router.get("", response_model=List[TemplateWithZones])
+def _sync_template_manifest(template: Template, db: Session, *, force: bool = False) -> Template:
+    svg_content = _read_template_svg(template)
+    try:
+        structure = parse_svg_structure(svg_content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid SVG for template {template.id}: {exc}") from exc
+    normalized = normalize_manifest_v2(migrate_manifest_to_v2(template.template_manifest, structure))
+
+    changed = force or template.template_manifest != normalized
+    if changed:
+        template.template_manifest = normalized
+
+    if force or _zones_need_refresh(template, normalized):
+        _replace_template_zones_from_manifest(template, normalized, db)
+        changed = True
+
+    canvas = normalized.get("canvas") if isinstance(normalized.get("canvas"), dict) else {}
+    width = int(canvas.get("target_width") or canvas.get("source_width") or template.width or 750)
+    height = int(canvas.get("target_height") or canvas.get("source_height") or template.height or 1575)
+    if template.width != width or template.height != height:
+        template.width = width
+        template.height = height
+        changed = True
+
+    if force:
+        _write_overlay_svg(template, svg_content)
+
+    if changed:
+        db.commit()
+        db.refresh(template)
+
+    return template
+
+
+def _build_detected_manifest(template: Template, ocr_results_payload: list[dict[str, Any]] | None) -> dict[str, Any]:
+    svg_content = _read_template_svg(template)
+    structure = parse_svg_structure(svg_content)
+    existing = normalize_manifest_v2(migrate_manifest_to_v2(template.template_manifest, structure))
+    ocr_results = parse_ocr_results(ocr_results_payload)
+    detected = build_manifest_v2(structure, ocr_results=ocr_results, previous_manifest=existing)
+    return normalize_manifest_v2(detected)
+
+
+@router.get("", response_model=list[TemplateWithZones])
 def list_templates(db: Session = Depends(get_db)):
-    """List all templates with zones."""
+    """List all templates with synchronized detection manifests."""
     templates = db.query(Template).order_by(Template.created_at.desc()).all()
     changed = False
     for template in templates:
-        changed = _refresh_template_zones_if_stale(template, db) or changed
+        try:
+            before = template.template_manifest
+            _sync_template_manifest(template, db)
+            changed = changed or before != template.template_manifest
+        except HTTPException:
+            continue
+        except Exception as exc:
+            logger.warning("Template sync skipped for %s: %s", template.id, exc)
     if changed:
         templates = db.query(Template).order_by(Template.created_at.desc()).all()
     return templates
@@ -119,91 +213,52 @@ async def upload_template(
     file: UploadFile = File(None),
     db: Session = Depends(get_db),
 ):
-    """Upload an SVG template.
+    """Upload a new SVG template and run initial detection."""
+    logger.info("Template upload request from %s", request.client.host if request.client else "unknown")
 
-    The template parser will automatically detect:
-    - Image zones from clipPath elements
-    - Text zone position and dimensions
-    - Canvas dimensions from viewBox
-    - Static text elements (brand, footer)
-    """
-    import logging
-    import json
-
-    logging.info(f"Template upload request received")
-    logging.info(f"Name: {name}")
-    logging.info(f"File: {file.filename if file else None}")
-
-    # Check name parameter
     if not name:
-        logging.error("No name provided")
         raise HTTPException(status_code=422, detail="Template name is required")
-
-    # Check file parameter
-    if not file:
-        logging.error("No file provided")
+    if not file or not file.filename:
         raise HTTPException(status_code=422, detail="No file uploaded")
-
-    # Check file extension
-    filename = file.filename if file.filename else ''
-    if not filename.lower().endswith('.svg'):
+    if not file.filename.lower().endswith(".svg"):
         raise HTTPException(status_code=400, detail="File must be an SVG")
 
-    # Read SVG content
-    try:
-        content = await file.read()
-    except Exception as e:
-        logging.error(f"Failed to read file: {e}")
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {str(e)}")
-
+    content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="File is empty")
 
-    logging.info(f"Read {len(content)} bytes from file")
-
-    # Try to decode
     try:
-        svg_text = content.decode('utf-8')
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="File must be valid UTF-8 text")
+        svg_content = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="File must be valid UTF-8 text") from exc
 
-    # Parse SVG using new clipPath-based parser
     try:
-        parsed = parse_svg_template(svg_text)
-        logging.info(f"Parsed SVG: {parsed['width']}x{parsed['height']}, zones: {len(parsed['zones'])}")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid SVG: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error parsing SVG: {str(e)}")
+        structure = parse_svg_structure(svg_content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse SVG structure: {exc}") from exc
 
-    # Save original SVG file
     file_id = str(uuid.uuid4())
     filename = f"{file_id}.svg"
-    file_path = STORAGE_DIR / filename
+    (STORAGE_DIR / filename).write_text(svg_content, encoding="utf-8")
 
-    with open(file_path, 'wb') as f:
-        f.write(content)
+    manifest = normalize_manifest_v2(build_manifest_v2(structure, ocr_results=None, previous_manifest=None))
+    canvas = manifest.get("canvas") if isinstance(manifest.get("canvas"), dict) else {}
 
-    # Save stripped overlay SVG
-    overlay_filename = f"{file_id}_overlay.svg"
-    overlay_path = OVERLAYS_DIR / overlay_filename
-    with open(overlay_path, 'w', encoding='utf-8') as f:
-        f.write(parsed['stripped_svg'])
-
-    # Create template record
     template = Template(
         name=name,
         filename=filename,
-        overlay_svg=overlay_filename,
-        width=TARGET_TEMPLATE_WIDTH,
-        height=TARGET_TEMPLATE_HEIGHT,
+        width=int(canvas.get("target_width") or canvas.get("source_width") or 750),
+        height=int(canvas.get("target_height") or canvas.get("source_height") or 1575),
+        template_manifest=manifest,
     )
     db.add(template)
     db.commit()
     db.refresh(template)
 
-    _replace_template_zones(template, parsed, db)
-
+    _write_overlay_svg(template, svg_content)
+    _replace_template_zones_from_manifest(template, manifest, db)
     db.commit()
     db.refresh(template)
 
@@ -212,11 +267,101 @@ async def upload_template(
 
 @router.get("/{template_id}", response_model=TemplateWithZones)
 def get_template(template_id: int, db: Session = Depends(get_db)):
-    """Get template with zones."""
+    """Get a single template with synced manifest/zones."""
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    _refresh_template_zones_if_stale(template, db)
+    return _sync_template_manifest(template, db)
+
+
+@router.post("/{template_id}/detect/start")
+def detect_template_start(
+    template_id: int,
+    payload: TemplateDetectionStartRequest,
+    db: Session = Depends(get_db),
+):
+    """Start detection: parse structure and return OCR crop candidates."""
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    svg_content = _read_template_svg(template)
+    try:
+        structure = parse_svg_structure(svg_content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    candidate_crops = render_candidate_crops(svg_content, structure, max_regions=payload.max_regions)
+    return {
+        "template_id": template.id,
+        "structure": structure,
+        "candidate_crops": candidate_crops,
+    }
+
+
+@router.post("/{template_id}/detect/finalize", response_model=TemplateWithZones)
+def detect_template_finalize(
+    template_id: int,
+    payload: TemplateDetectionFinalizeRequest,
+    db: Session = Depends(get_db),
+):
+    """Finalize detection using OCR rows and persist manifest v2."""
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        manifest = _build_detected_manifest(
+            template,
+            [row.model_dump() for row in payload.ocr_results],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    template.template_manifest = manifest
+    _replace_template_zones_from_manifest(template, manifest, db)
+    db.commit()
+    db.refresh(template)
+    return template
+
+
+@router.put("/{template_id}/manifest", response_model=TemplateWithZones)
+def update_template_manifest(
+    template_id: int,
+    payload: TemplateManifestUpdate,
+    db: Session = Depends(get_db),
+):
+    """Atomically persist SVG + canonical detection manifest."""
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    svg_text = str(payload.svg_content or "").strip()
+    if not svg_text:
+        raise HTTPException(status_code=400, detail="svg_content is required")
+
+    try:
+        structure = parse_svg_structure(svg_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        base = migrate_manifest_to_v2(payload.template_manifest, structure)
+        manifest = normalize_manifest_v2(base)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid template_manifest: {exc}") from exc
+
+    _write_template_svg(template, svg_text)
+    _write_overlay_svg(template, svg_text)
+
+    canvas = manifest.get("canvas") if isinstance(manifest.get("canvas"), dict) else {}
+    template.width = int(canvas.get("target_width") or canvas.get("source_width") or 750)
+    template.height = int(canvas.get("target_height") or canvas.get("source_height") or 1575)
+    template.template_manifest = manifest
+
+    _replace_template_zones_from_manifest(template, manifest, db)
+    db.commit()
+    db.refresh(template)
     return template
 
 
@@ -231,47 +376,29 @@ def add_zone(
     props: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Add a zone to a template."""
+    """Compatibility endpoint for manual zone insertion (legacy)."""
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-
-    if zone_type not in ['text', 'image']:
+    if zone_type not in {"text", "image"}:
         raise HTTPException(status_code=400, detail="zone_type must be 'text' or 'image'")
 
-    # Parse props JSON if provided
     import json
-    parsed_props = json.loads(props) if props else None
 
+    parsed_props = json.loads(props) if props else None
     zone = TemplateZone(
         template_id=template_id,
         zone_type=zone_type,
         x=x,
         y=y,
-        width=width,
-        height=height,
+        width=max(1, width),
+        height=max(1, height),
         props=parsed_props,
     )
     db.add(zone)
     db.commit()
     db.refresh(zone)
-
     return zone
-
-
-@router.delete("/{template_id}/zones/{zone_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_zone(template_id: int, zone_id: int, db: Session = Depends(get_db)):
-    """Delete a zone from a template."""
-    zone = db.query(TemplateZone).filter(
-        TemplateZone.id == zone_id,
-        TemplateZone.template_id == template_id
-    ).first()
-    if not zone:
-        raise HTTPException(status_code=404, detail="Zone not found")
-
-    db.delete(zone)
-    db.commit()
-    return None
 
 
 @router.patch("/{template_id}/zones/{zone_id}", response_model=TemplateZoneResponse)
@@ -285,7 +412,7 @@ def update_zone(
     props: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Update a zone position/size/props."""
+    """Compatibility endpoint for manual zone edits (legacy)."""
     zone = db.query(TemplateZone).filter(
         TemplateZone.id == zone_id,
         TemplateZone.template_id == template_id,
@@ -298,9 +425,9 @@ def update_zone(
     if y is not None:
         zone.y = y
     if width is not None:
-        zone.width = width
+        zone.width = max(1, width)
     if height is not None:
-        zone.height = height
+        zone.height = max(1, height)
     if props is not None:
         import json
 
@@ -311,17 +438,35 @@ def update_zone(
     return zone
 
 
+@router.delete("/{template_id}/zones/{zone_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_zone(template_id: int, zone_id: int, db: Session = Depends(get_db)):
+    """Compatibility endpoint for removing a legacy zone."""
+    zone = db.query(TemplateZone).filter(
+        TemplateZone.id == zone_id,
+        TemplateZone.template_id == template_id,
+    ).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    db.delete(zone)
+    db.commit()
+    return None
+
+
 @router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_template(template_id: int, db: Session = Depends(get_db)):
-    """Delete a template."""
+    """Delete template row and stored files."""
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    # Delete file
-    file_path = STORAGE_DIR / template.filename
-    if file_path.exists():
-        file_path.unlink()
+    template_path = STORAGE_DIR / template.filename
+    if template_path.exists():
+        template_path.unlink()
+
+    if template.overlay_svg:
+        overlay_path = OVERLAYS_DIR / template.overlay_svg
+        if overlay_path.exists():
+            overlay_path.unlink()
 
     db.delete(template)
     db.commit()
@@ -330,7 +475,7 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{template_id}/file")
 async def get_template_file(template_id: int, db: Session = Depends(get_db)):
-    """Get the actual SVG file."""
+    """Return the raw SVG template file."""
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -342,34 +487,26 @@ async def get_template_file(template_id: int, db: Session = Depends(get_db)):
     return FileResponse(
         file_path,
         media_type="image/svg+xml",
-        filename=f"{template.name}.svg"
+        filename=f"{template.name}.svg",
     )
 
 
 @router.get("/{template_id}/overlay")
 async def get_template_overlay(template_id: int, db: Session = Depends(get_db)):
-    """Get the overlay SVG for rendering (without placeholder images)."""
+    """Return stripped overlay SVG used at render time."""
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    template_path = STORAGE_DIR / template.filename
-    if not template_path.exists():
-        raise HTTPException(status_code=404, detail="Template file not found")
-
-    with open(template_path, 'r', encoding='utf-8') as source_file:
-        svg_text = source_file.read()
-
+    svg_text = _read_template_svg(template)
     parsed = parse_svg_template(svg_text)
+    stripped = str(parsed.get("stripped_svg") or svg_text)
 
     if template.overlay_svg:
-        overlay_path = OVERLAYS_DIR / template.overlay_svg
-        with open(overlay_path, 'w', encoding='utf-8') as overlay_file:
-            overlay_file.write(parsed["stripped_svg"])
+        (OVERLAYS_DIR / template.overlay_svg).write_text(stripped, encoding="utf-8")
 
-    from fastapi.responses import Response
     return Response(
-        content=parsed["stripped_svg"],
+        content=stripped,
         media_type="image/svg+xml",
         headers={"Content-Disposition": f'inline; filename="{template.name}_overlay.svg"'},
     )
@@ -378,6 +515,7 @@ async def get_template_overlay(template_id: int, db: Session = Depends(get_db)):
 @router.get("/fonts/list")
 def list_fonts(db: Session = Depends(get_db)):
     """List uploaded custom fonts."""
+
     def _readable_family(record: CustomFont) -> str:
         family = (record.family or "").strip()
         if family and family.lower() != "custom font":
@@ -385,12 +523,10 @@ def list_fonts(db: Session = Depends(get_db)):
 
         original = (record.original_name or "").strip()
         if original:
-            original_stem = Path(original).stem.strip()
-            # Ignore UUID-like placeholders.
-            if original_stem and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", original_stem.lower()):
-                return original_stem.replace("-", " ").replace("_", " ")
+            stem = Path(original).stem.strip()
+            if stem and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", stem.lower()):
+                return stem.replace("-", " ").replace("_", " ")
 
-        # Fallback for names like "<uuid>__font-name.otf".
         file_stem = Path(record.filename or "").stem.strip()
         if "__" in file_stem:
             maybe_slug = file_stem.split("__", 1)[1].strip()
@@ -403,37 +539,39 @@ def list_fonts(db: Session = Depends(get_db)):
         return "Custom Font"
 
     records = db.query(CustomFont).order_by(CustomFont.created_at.desc()).all()
-    items = []
+    fonts = []
     for record in records:
-        path = FONT_DIR / record.filename
-        if not path.exists():
+        if not (FONT_DIR / record.filename).exists():
             continue
-        family = _readable_family(record)
-        items.append({"filename": record.filename, "family": family})
-    return {"fonts": items}
+        fonts.append({"filename": record.filename, "family": _readable_family(record)})
+    return {"fonts": fonts}
 
 
 @router.post("/fonts/upload")
-async def upload_font(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Upload a custom font file for template text rendering."""
+async def upload_font(
+    file: UploadFile = File(...),
+    family: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Upload custom font used by template text zones."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
+
     suffix = Path(file.filename).suffix.lower()
     if suffix not in {".ttf", ".otf", ".woff", ".woff2"}:
         raise HTTPException(status_code=400, detail="Supported formats: ttf, otf, woff, woff2")
 
-    original_stem = Path(file.filename).stem.strip()
-    pretty_family = original_stem.replace("-", " ").replace("_", " ") or "Custom Font"
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", original_stem).strip("-").lower() or "custom-font"
-    file_id = str(uuid.uuid4())
-    safe_name = f"{file_id}__{slug}{suffix}"
-    dest = FONT_DIR / safe_name
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty font file")
 
-    with open(dest, "wb") as out:
-        out.write(content)
+    original_stem = Path(file.filename).stem.strip()
+    pretty_family = (family or "").strip() or original_stem.replace("-", " ").replace("_", " ") or "Custom Font"
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", original_stem).strip("-").lower() or "custom-font"
+    safe_name = f"{uuid.uuid4()}__{slug}{suffix}"
+    dest = FONT_DIR / safe_name
+    dest.write_bytes(content)
+
     db_font = CustomFont(
         filename=safe_name,
         original_name=file.filename,
@@ -442,15 +580,12 @@ async def upload_font(file: UploadFile = File(...), db: Session = Depends(get_db
     db.add(db_font)
     db.commit()
 
-    return {
-        "filename": safe_name,
-        "family": pretty_family,
-    }
+    return {"filename": safe_name, "family": pretty_family}
 
 
 @router.get("/fonts/{filename}")
 def get_font_file(filename: str):
-    """Serve an uploaded custom font file."""
+    """Serve an uploaded font file by filename."""
     safe_name = Path(filename).name
     font_path = FONT_DIR / safe_name
     if not font_path.exists():
