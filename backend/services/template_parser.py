@@ -1076,12 +1076,94 @@ def strip_placeholders(svg_content: str, text_zone_y: int, text_zone_height: int
         logger.warning(f"Failed to parse SVG for placeholder removal: {e}, falling back to regex")
         return _strip_placeholders_fallback(svg_content)
 
-    result = ET.tostring(root, encoding='unicode')
-    result = re.sub(r'<image[^>]*>', '', result)
-    result = re.sub(r'</image>', '', result)
-    result = re.sub(r'<rect[^>]*\s(?:x|y)=["\']-\d[^>]*>', '', result)
+    parent_map: dict[ET.Element, ET.Element] = {
+        child: parent
+        for parent in root.iter()
+        for child in parent
+    }
 
-    return result
+    tz_top = text_zone_y - 10
+    tz_bottom = text_zone_y + text_zone_height + 10
+
+    def _safe_float(value: Optional[str], fallback: float = 0.0) -> float:
+        try:
+            return float(value) if value is not None else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    def _extract_translate_y(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        match = re.search(r'translate\(\s*[\d.-]+\s*,\s*([\d.-]+)\s*\)', value)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    def _direct_transform_child_in_zone(elem: ET.Element) -> bool:
+        for child in list(elem):
+            ty = _extract_translate_y(child.get('transform'))
+            if ty is not None and tz_top <= ty <= tz_bottom:
+                return True
+        return False
+
+    # 1) Remove all image placeholders.
+    for elem in list(root.iter()):
+        if not elem.tag.endswith('image'):
+            continue
+        parent = parent_map.get(elem)
+        if parent is not None:
+            parent.remove(elem)
+
+    # 2) Remove oversized negative background rects.
+    for elem in list(root.iter()):
+        if not elem.tag.endswith('rect'):
+            continue
+        x_raw = elem.get('x', '0')
+        y_raw = elem.get('y', '0')
+        try:
+            x = float(x_raw)
+        except (TypeError, ValueError):
+            x = 0.0
+        try:
+            y = float(y_raw)
+        except (TypeError, ValueError):
+            y = 0.0
+        if x < -5 or y < -5:
+            parent = parent_map.get(elem)
+            if parent is not None:
+                parent.remove(elem)
+
+    # 3) Remove Canva-style placeholder glyph groups inside the editable title zone.
+    for elem in list(root.iter()):
+        if not elem.tag.endswith('g'):
+            continue
+        if elem.get('fill-opacity') is None:
+            continue
+        if elem.get('clip-path') or elem.get('transform'):
+            continue
+        if not _direct_transform_child_in_zone(elem):
+            continue
+        parent = parent_map.get(elem)
+        if parent is not None:
+            parent.remove(elem)
+
+    # 4) Remove text/tspan placeholders within the main title zone only.
+    for elem in list(root.iter()):
+        if not (elem.tag.endswith('text') or elem.tag.endswith('tspan')):
+            continue
+        if not is_text_in_zone(elem, text_zone_y, text_zone_height):
+            continue
+        y_value = _safe_float(elem.get('y'), 0.0)
+        if y_value and not (text_zone_y - 20 <= y_value <= text_zone_y + text_zone_height + 20):
+            continue
+        parent = parent_map.get(elem)
+        if parent is not None:
+            parent.remove(elem)
+
+    return ET.tostring(root, encoding='unicode')
 
 
 def _strip_placeholders_fallback(svg_content: str) -> str:

@@ -84,6 +84,15 @@ class KeywordUploadResponse(BaseModel):
     errors: list[str]
 
 
+class TrendKeywordUploadResponse(BaseModel):
+    """Response for trend keyword CSV upload."""
+    total_rows: int
+    inserted: int
+    updated: int
+    duplicates_skipped: int
+    errors: list[str]
+
+
 class KeywordRow(BaseModel):
     """Single keyword row from CSV."""
     url: str
@@ -301,6 +310,7 @@ class PinRenderSettings(BaseModel):
     text_effect_offset_x: int | None = None
     text_effect_offset_y: int | None = None
     text_effect_blur: int | None = None
+    title_scale: float | None = None
     custom_font_file: str | None = None
 
 
@@ -417,6 +427,7 @@ class PinGenerateRequest(BaseModel):
     diversity_enabled: bool | None = None
     diversity_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     semantic_enabled: bool | None = None
+    image_settings: dict[str, Any] | None = None
 
 
 class GenerationPreviewRequest(BaseModel):
@@ -562,6 +573,7 @@ class ExportRequest(BaseModel):
     """Request for CSV export."""
     selected_only: bool = True
     pin_ids: list[int] | None = None
+    website_id: int | None = None
 
 
 class ExportResponse(BaseModel):

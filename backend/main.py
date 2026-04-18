@@ -1,6 +1,7 @@
 """
 Main FastAPI application.
 """
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from database import engine, get_db, init_db, SessionLocal
 from models import ScheduleSettings
 from services.auth import is_request_authenticated
+from services.workflow_scheduler import run_workflow_scheduler
 
 # Static files directory
 STATIC_DIR = Path(__file__).parent / "static"
@@ -54,7 +56,18 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
-    yield
+    stop_event = asyncio.Event()
+    scheduler_task = asyncio.create_task(run_workflow_scheduler(stop_event))
+
+    try:
+        yield
+    finally:
+        stop_event.set()
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
@@ -72,10 +85,12 @@ from routers import (
     auth,
     websites,
     keywords,
+    playground,
     templates,
     images,
     pins,
     schedule,
+    workflow,
     export,
     ai_presets,
 )
@@ -83,10 +98,12 @@ from routers import (
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(websites.router, prefix="/api/websites", tags=["websites"])
 app.include_router(keywords.router, prefix="/api/keywords", tags=["keywords"])
+app.include_router(playground.router, prefix="/api/playground", tags=["playground"])
 app.include_router(templates.router, prefix="/api/templates", tags=["templates"])
 app.include_router(images.router, prefix="/api/images", tags=["images"])
 app.include_router(pins.router, prefix="/api/pins", tags=["pins"])
 app.include_router(schedule.router, prefix="/api/schedule", tags=["schedule"])
+app.include_router(workflow.router, prefix="/api/workflow", tags=["workflow"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(ai_presets.router, prefix="/api/ai-presets", tags=["ai-presets"])
 
@@ -135,6 +152,11 @@ if assets_dir.exists():
 generated_pins_dir = Path(__file__).parent.parent / "storage" / "generated_pins"
 generated_pins_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/static/pins", StaticFiles(directory=str(generated_pins_dir)), name="pins")
+
+# Mount uploaded template SVGs for Playground client-side rendering
+templates_dir = Path(__file__).parent.parent / "storage" / "templates"
+templates_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/static/templates", StaticFiles(directory=str(templates_dir)), name="templates")
 
 
 @app.get("/{full_path:path}")

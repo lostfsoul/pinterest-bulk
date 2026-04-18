@@ -16,9 +16,10 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import PinDraft, ExportLog, ScheduleSettings, Template
+from models import PinDraft, ExportLog, Page, ScheduleSettings, Template, Website
 from schemas import ExportRequest, ExportResponse
 from services.pin_renderer import RENDER_LAYOUT_VERSION, generate_pin_media_url, resolve_render_engine
+from services.workflow_service import build_daily_slots_for_day, resolve_website_schedule_config
 
 router = APIRouter()
 
@@ -109,6 +110,8 @@ def resolve_pins_per_day_for_index(day_index: int, settings: ScheduleSettings) -
 def calculate_publish_dates(
     pins: List[PinDraft],
     settings: ScheduleSettings,
+    website: Website | None = None,
+    website_config: dict | None = None,
 ) -> List[tuple[PinDraft, datetime]]:
     """Calculate publish dates for pins based on schedule settings."""
     result: list[tuple[PinDraft, datetime]] = []
@@ -119,11 +122,19 @@ def calculate_publish_dates(
 
     day_pointer = datetime.now(tz=timezone).replace(hour=0, minute=0, second=0, microsecond=0)
     day_index = 0
-    day_slots = build_daily_slots(
-        day_pointer,
-        settings,
-        pins_per_day=resolve_pins_per_day_for_index(day_index, settings),
-    )
+    if website and website_config:
+        day_slots = build_daily_slots_for_day(
+            website=website,
+            config=website_config,
+            day_start=day_pointer,
+            day_index=day_index,
+        )
+    else:
+        day_slots = build_daily_slots(
+            day_pointer,
+            settings,
+            pins_per_day=resolve_pins_per_day_for_index(day_index, settings),
+        )
     slot_index = 0
 
     for pin in sorted_pins:
@@ -133,11 +144,19 @@ def calculate_publish_dates(
             if slot_index >= len(day_slots):
                 day_pointer = day_pointer + timedelta(days=1)
                 day_index += 1
-                day_slots = build_daily_slots(
-                    day_pointer,
-                    settings,
-                    pins_per_day=resolve_pins_per_day_for_index(day_index, settings),
-                )
+                if website and website_config:
+                    day_slots = build_daily_slots_for_day(
+                        website=website,
+                        config=website_config,
+                        day_start=day_pointer,
+                        day_index=day_index,
+                    )
+                else:
+                    day_slots = build_daily_slots(
+                        day_pointer,
+                        settings,
+                        pins_per_day=resolve_pins_per_day_for_index(day_index, settings),
+                    )
                 slot_index = 0
                 continue
 
@@ -316,6 +335,16 @@ def export_csv(
     # Get pins to export
     query = db.query(PinDraft)
 
+    if request.website_id is None:
+        raise HTTPException(status_code=400, detail="website_id is required for export scheduling.")
+
+    target_website: Website | None = None
+    target_website_config: dict | None = None
+    target_website = db.query(Website).filter(Website.id == request.website_id).first()
+    if not target_website:
+        raise HTTPException(status_code=404, detail="Website not found")
+    query = query.join(Page, Page.id == PinDraft.page_id).filter(Page.website_id == request.website_id)
+
     if request.pin_ids:
         query = query.filter(PinDraft.id.in_(request.pin_ids))
     elif request.selected_only:
@@ -360,8 +389,18 @@ def export_csv(
         db.commit()
         db.refresh(settings)
 
+    target_website_config = resolve_website_schedule_config(db, target_website)
+    timezone = target_website_config.get("timezone")
+    if isinstance(timezone, str) and timezone.strip():
+        settings.timezone = timezone.strip()
+
     # Calculate publish dates
-    pins_with_dates = calculate_publish_dates(rendered_pins, settings)
+    pins_with_dates = calculate_publish_dates(
+        rendered_pins,
+        settings,
+        website=target_website,
+        website_config=target_website_config,
+    )
 
     # Create filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

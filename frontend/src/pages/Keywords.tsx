@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import apiClient, { KeywordEntry, Website } from '../services/api';
+import apiClient, { KeywordEntry, TrendKeywordEntry, TrendKeywordUploadResponse, Website } from '../services/api';
 import { Button } from '../components/Button';
 
 interface UploadResult {
@@ -28,6 +28,10 @@ export default function Keywords() {
   const [editingUrl, setEditingUrl] = useState<string | null>(null);
   const [editKeywords, setEditKeywords] = useState('');
   const [saving, setSaving] = useState(false);
+  const [trendEntries, setTrendEntries] = useState<TrendKeywordEntry[]>([]);
+  const [loadingTrendEntries, setLoadingTrendEntries] = useState(false);
+  const [trendUploading, setTrendUploading] = useState(false);
+  const [trendUploadResult, setTrendUploadResult] = useState<TrendKeywordUploadResponse | null>(null);
 
   useEffect(() => {
     void loadInitial();
@@ -44,6 +48,7 @@ export default function Keywords() {
 
   useEffect(() => {
     void loadEntries();
+    void loadTrendEntries();
   }, [activeWebsiteId]);
 
   const activeWebsite = useMemo(
@@ -99,6 +104,23 @@ export default function Keywords() {
       setEntries([]);
     } finally {
       setLoadingEntries(false);
+    }
+  }
+
+  async function loadTrendEntries() {
+    if (!activeWebsiteId) {
+      setTrendEntries([]);
+      return;
+    }
+    setLoadingTrendEntries(true);
+    try {
+      const response = await apiClient.listTrendKeywords(activeWebsiteId);
+      setTrendEntries(response.data);
+    } catch (error) {
+      console.error('Failed to load trend keyword entries:', error);
+      setTrendEntries([]);
+    } finally {
+      setLoadingTrendEntries(false);
     }
   }
 
@@ -158,6 +180,23 @@ export default function Keywords() {
     e.target.value = '';
   };
 
+  const handleTrendFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!activeWebsiteId) {
+      alert('Select a website first.');
+      e.target.value = '';
+      return;
+    }
+    if (!file.name.endsWith('.csv')) {
+      alert('Please upload a CSV file');
+      e.target.value = '';
+      return;
+    }
+    void uploadTrendFile(activeWebsiteId, file);
+    e.target.value = '';
+  };
+
   async function uploadFile(file: File) {
     setUploading(true);
     setUploadResult(null);
@@ -173,6 +212,21 @@ export default function Keywords() {
     }
   }
 
+  async function uploadTrendFile(websiteId: number, file: File) {
+    setTrendUploading(true);
+    setTrendUploadResult(null);
+    try {
+      const response = await apiClient.uploadTrendKeywords(websiteId, file);
+      setTrendUploadResult(response.data);
+      await loadTrendEntries();
+    } catch (error) {
+      console.error('Failed to upload trend keywords:', error);
+      alert('Failed to upload trend keywords. Check CSV format.');
+    } finally {
+      setTrendUploading(false);
+    }
+  }
+
   function downloadTemplate() {
     const csv = [
       'url,keywords',
@@ -184,6 +238,22 @@ export default function Keywords() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'keywords_template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadTrendTemplate() {
+    const csv = [
+      'keyword,period_type,period_value,weight',
+      '"summer salad ideas",season,summer,1.4',
+      '"back to school lunch",month,august,2.0',
+      '"easy dinner recipes",always,,1.0',
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'trend_keywords_template.csv';
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -268,6 +338,103 @@ export default function Keywords() {
           </div>
         </div>
       )}
+
+      <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">Trend Keywords</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Upload ranking keywords for {activeWebsite ? activeWebsite.name : 'the selected website'}.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void loadTrendEntries()}
+            disabled={loadingTrendEntries || !activeWebsiteId}
+          >
+            Refresh
+          </Button>
+        </div>
+
+        <div className="p-4 bg-gray-50 rounded-lg">
+          <p className="text-sm text-gray-700 mb-2">
+            <strong>CSV headers:</strong> <code>keyword,period_type,period_value,weight</code>
+          </p>
+          <p className="text-xs text-gray-500 mb-2">
+            `period_type`: always | month | season. `period_value` needed only for month/season.
+          </p>
+          <button
+            onClick={downloadTrendTemplate}
+            className="text-sm text-blue-600 hover:text-blue-800 underline"
+          >
+            Download trend template
+          </button>
+        </div>
+
+        <input
+          type="file"
+          accept=".csv"
+          onChange={handleTrendFileChange}
+          disabled={!activeWebsiteId}
+          className="block w-full text-sm text-gray-500
+            file:mr-4 file:py-2 file:px-4
+            file:rounded-md file:border-0
+            file:text-sm file:font-semibold
+            file:bg-violet-50 file:text-violet-700
+            hover:file:bg-violet-100 disabled:opacity-60"
+        />
+        {trendUploading && <p className="text-sm text-gray-600">Uploading trend keywords...</p>}
+
+        {trendUploadResult && (
+          <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm space-y-1">
+            <p>Total rows: <strong>{trendUploadResult.total_rows}</strong></p>
+            <p>Inserted: <strong className="text-green-700">{trendUploadResult.inserted}</strong></p>
+            <p>Updated: <strong>{trendUploadResult.updated}</strong></p>
+            <p>Duplicates skipped: <strong>{trendUploadResult.duplicates_skipped}</strong></p>
+            {trendUploadResult.errors.length > 0 && (
+              <p className="text-yellow-800">Warnings: {trendUploadResult.errors.length} row(s) had issues.</p>
+            )}
+          </div>
+        )}
+
+        <div className="border border-gray-200 rounded-md overflow-hidden">
+          <div className="max-h-[340px] overflow-auto">
+            <table className="min-w-full text-sm">
+              <thead className="bg-gray-50 sticky top-0">
+                <tr>
+                  <th className="text-left p-2 border-b">Keyword</th>
+                  <th className="text-left p-2 border-b">Period</th>
+                  <th className="text-left p-2 border-b">Weight</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trendEntries.map((entry) => (
+                  <tr key={entry.id} className="border-b">
+                    <td className="p-2">{entry.keyword}</td>
+                    <td className="p-2">
+                      {entry.period_type}
+                      {entry.period_value ? ` (${entry.period_value})` : ''}
+                    </td>
+                    <td className="p-2">{entry.weight}</td>
+                  </tr>
+                ))}
+                {trendEntries.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="p-4 text-center text-gray-500">
+                      {loadingTrendEntries
+                        ? 'Loading trend keywords...'
+                        : activeWebsiteId
+                          ? 'No trend keywords uploaded for this website yet.'
+                          : 'No website selected.'}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
 
       <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
         <div className="flex items-center justify-between gap-3">

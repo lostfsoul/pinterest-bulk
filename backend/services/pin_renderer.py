@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, List
 import tempfile
 import os
 import shutil
+import uuid
 from io import BytesIO
 from sqlalchemy.orm import Session
 import logging
@@ -95,6 +96,7 @@ async def render_pin_to_file(
     output_path: Path,
     settings: Optional[Dict[str, Any]] = None,
     selected_image_url: Optional[str] = None,
+    pin_title: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Render a single pin to a PNG file using Node.js canvas.
 
@@ -105,6 +107,7 @@ async def render_pin_to_file(
         output_path: Where to save the PNG file
         settings: Optional rendering settings (font, colors, etc.)
         selected_image_url: Optional specific image URL to use for this pin
+        pin_title: Optional pin draft title to render (falls back to page title)
 
     Returns:
         Tuple of (success, renderer_engine_used)
@@ -258,6 +261,8 @@ async def render_pin_to_file(
             'textEffectOffsetX': settings.get('text_effect_offset_x', settings.get('textEffectOffsetX', 2)),
             'textEffectOffsetY': settings.get('text_effect_offset_y', settings.get('textEffectOffsetY', 2)),
             'textEffectBlur': settings.get('text_effect_blur', settings.get('textEffectBlur', 0)),
+            'titleScale': settings.get('title_scale', settings.get('titleScale', 1)),
+            'deferCustomTitleToPillow': bool(settings.get('custom_font_file', settings.get('customFontFile'))),
             'customFontFile': settings.get('custom_font_file', settings.get('customFontFile')),
             'secondaryTextValues': settings.get('secondary_text_values', settings.get('secondaryTextValues', dict(secondary_text_defaults))),
         }
@@ -302,7 +307,7 @@ async def render_pin_to_file(
             'secondaryTextDefaults': secondary_text_defaults,
         },
         'content': {
-            'title': page.title or '',
+            'title': (pin_title or '').strip() or (page.title or ''),
             'imageUrls': image_data_urls,
             'image1Url': image_data_urls[0] if len(image_data_urls) > 0 else None,
             'image2Url': image_data_urls[1] if len(image_data_urls) > 1 else None,
@@ -319,7 +324,7 @@ async def render_pin_to_file(
             node_result = await _render_with_nodejs(render_data)
             result = bool(node_result.get("success"))
             engine_used = str(node_result.get("engine") or "canvas").strip().lower() or "canvas"
-            if result and output_path.exists() and engine_used != "resvg":
+            if result and output_path.exists():
                 _apply_custom_font_overlay(output_path, render_data)
             if result:
                 return True, engine_used
@@ -518,6 +523,7 @@ def _fit_text_lines_with_pillow(
     effect_margin_x: int = 0,
     effect_margin_y: int = 0,
     preferred_font_size: int | None = None,
+    split_layout: bool = False,
 ) -> tuple[list[str], Any, int]:
     from PIL import ImageFont
 
@@ -598,6 +604,84 @@ def _fit_text_lines_with_pillow(
             adjusted[-1] = fit_line_with_ellipsis(adjusted[-1], font)
 
         return adjusted or [""]
+
+    def max_width(lines: list[str], font) -> int:
+        return max((line_width(line, font) for line in lines), default=0)
+
+    def find_max_font_for_lines(lines: list[str]) -> tuple[int, Any]:
+        low = 6
+        if preferred_font_size is not None and int(preferred_font_size) > 0:
+            high = max(8, min(220, int(preferred_font_size)))
+        else:
+            high = 220
+        best_size_local = 6
+        best_font_local = load_font(6)
+        while low <= high:
+            size = (low + high) // 2
+            font = load_font(size)
+            line_height = max(1, int(round(size * 1.0)))
+            total_height = line_height * len(lines)
+            max_line_w = max_width(lines, font)
+            fits = len(lines) <= max_lines and max_line_w <= usable_width and total_height <= usable_height
+            if fits:
+                best_size_local = size
+                best_font_local = font
+                low = size + 1
+            else:
+                high = size - 1
+        return best_size_local, best_font_local
+
+    if split_layout and max_lines >= 3 and normalized:
+        words = [part for part in normalized.split(" ") if part]
+        candidates: list[list[str]] = []
+        if words:
+            candidates.append([normalized])
+            if len(words) >= 2:
+                for i in range(1, len(words)):
+                    candidates.append([
+                        " ".join(words[:i]).strip(),
+                        " ".join(words[i:]).strip(),
+                    ])
+            if len(words) >= 4:
+                for i in range(1, len(words) - 1):
+                    for j in range(i + 1, len(words)):
+                        candidates.append([
+                            " ".join(words[:i]).strip(),
+                            " ".join(words[i:j]).strip(),
+                            " ".join(words[j:]).strip(),
+                        ])
+        if not candidates:
+            candidates = [[normalized]]
+
+        best_lines = candidates[0]
+        best_size = 6
+        best_font = load_font(best_size)
+        best_width = 10**9
+        for lines_candidate in candidates:
+            lines_candidate = [line for line in lines_candidate if line]
+            if not lines_candidate or len(lines_candidate) > max_lines:
+                continue
+            size_candidate, font_candidate = find_max_font_for_lines(lines_candidate)
+            width_candidate = max_width(lines_candidate, font_candidate)
+            if size_candidate > best_size or (size_candidate == best_size and width_candidate < best_width):
+                best_size = size_candidate
+                best_font = font_candidate
+                best_lines = lines_candidate
+                best_width = width_candidate
+
+        # Final hard clamp with ellipsis safety.
+        while best_size >= 6:
+            best_font = load_font(best_size)
+            clamped_lines = [fit_line_with_ellipsis(line, best_font) for line in best_lines[:max_lines]]
+            max_line_w = max_width(clamped_lines, best_font)
+            total_h = max(1, int(round(best_size * 1.0))) * len(clamped_lines)
+            if max_line_w <= usable_width and total_h <= usable_height:
+                return clamped_lines, best_font, best_size
+            best_size -= 1
+
+        fallback_font = load_font(6)
+        fallback_lines = [fit_line_with_ellipsis(line, fallback_font) for line in best_lines[:max_lines]]
+        return fallback_lines, fallback_font, 6
 
     best_lines = [normalized] if normalized else [""]
     best_font = load_font(12)
@@ -737,6 +821,8 @@ def _draw_fitted_text_block_with_pillow(
     max_lines: int = 3,
     uppercase: bool = False,
     preferred_font_size: int | None = None,
+    title_scale: float | None = None,
+    force_title_layout: bool = False,
 ) -> None:
     x, y, width, height = rect
     if width <= 4 or height <= 4:
@@ -759,11 +845,36 @@ def _draw_fitted_text_block_with_pillow(
         effect_margin_x=text_effect_offset_x,
         effect_margin_y=text_effect_offset_y + text_effect_blur,
         preferred_font_size=preferred_font_size,
+        split_layout=force_title_layout,
     )
 
-    metrics = draw.textbbox((0, 0), "A", font=font)
+    if title_scale is not None:
+        try:
+            scale = max(0.7, min(1.6, float(title_scale)))
+        except (TypeError, ValueError):
+            scale = 1.0
+        if abs(scale - 1.0) > 0.001:
+            target_size = max(8, min(220, int(round(font_size * scale))))
+            lines, font, font_size = _fit_text_lines_with_pillow(
+                draw,
+                text,
+                width,
+                height,
+                font_path,
+                fallback_font_path,
+                max_lines=max_lines,
+                uppercase=uppercase,
+                pad_x=15,
+                pad_y=0,
+                effect_margin_x=text_effect_offset_x,
+                effect_margin_y=text_effect_offset_y + text_effect_blur,
+                preferred_font_size=target_size,
+                split_layout=force_title_layout,
+            )
+
+    metrics = draw.textbbox((0, 0), "Ag", font=font)
     cap_height = (metrics[3] - metrics[1]) or font_size
-    line_height = font_size
+    line_height = max(1, int(round(font_size * 1.0)))
     visual_height = cap_height + (len(lines) - 1) * line_height
     first_y = y + (height - visual_height) / 2
     center_x = x + (width / 2)
@@ -836,22 +947,10 @@ def _apply_custom_font_overlay(
     text_effect_offset_x = int(settings.get("textEffectOffsetX", 2) or 2)
     text_effect_offset_y = int(settings.get("textEffectOffsetY", 2) or 2)
     text_effect_blur = int(settings.get("textEffectBlur", 0) or 0)
+    title_scale = settings.get("titleScale", settings.get("title_scale", 1))
     title = content.get("title", "")
 
-    # Replace the title area after the main render so uploaded fonts are deterministic.
-    draw.rectangle(
-        [pad_left, text_zone_y, width - pad_right, text_zone_y + text_zone_h],
-        fill=str(settings.get("textZoneBgColor") or "#ffffff"),
-    )
-    border_color = template.get("textZoneBorderColor")
-    if border_color:
-        border_width = int(template.get("textZoneBorderWidth") or 4)
-        half = border_width / 2
-        draw.rectangle(
-            [pad_left + half, text_zone_y + half, width - pad_right - half, text_zone_y + text_zone_h - half],
-            outline=border_color,
-            width=border_width,
-        )
+    # Keep original template background/border untouched; only redraw text with custom font.
 
     fallback_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     title_font_path = str(custom_font_path) if custom_font_path else None
@@ -873,6 +972,8 @@ def _apply_custom_font_overlay(
             text_effect_blur=text_effect_blur,
             max_lines=3,
             uppercase=True,
+            title_scale=title_scale,
+            force_title_layout=True,
         )
 
     secondary_defaults = template.get("secondaryTextDefaults") or {}
@@ -994,8 +1095,10 @@ async def generate_pin_media_url(
 
     template_data = parse_svg_template(svg_content)
 
-    # Generate output filename
-    output_filename = f"pin_{pin.id}.png"
+    # Generate output filename (unique per render to avoid stale-file collisions).
+    timestamp = int(time.time() * 1000)
+    suffix = uuid.uuid4().hex[:8]
+    output_filename = f"pin_{pin.id}_{timestamp}_{suffix}.png"
     output_path = RENDERER_DIR / output_filename
 
     # Render pin with the selected image
@@ -1006,6 +1109,7 @@ async def generate_pin_media_url(
         output_path,
         settings,
         pin.selected_image_url,
+        pin.title,
     )
 
     if success and output_path.exists():

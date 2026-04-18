@@ -286,7 +286,8 @@ def _generate_pin_drafts(
             .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
             .all()
         )
-        if auto_scrape_missing and not images and bool(image_settings.get("fetch_from_page", True)):
+        effective_image_settings = _resolve_effective_image_settings(site_settings, request.image_settings or None)
+        if auto_scrape_missing and not images and bool(effective_image_settings.get("fetch_from_page", True)):
             if global_rules is None:
                 from models import GlobalExcludedImage
                 global_rules = db.query(GlobalExcludedImage).all()
@@ -315,7 +316,7 @@ def _generate_pin_drafts(
                 failed_pages=failed_pages,
             )
 
-        images = apply_generation_image_filters(images, site_settings)
+        images = apply_generation_image_filters(images, {"image_settings": effective_image_settings})
         existing_for_constraints = (
             db.query(PinDraft)
             .filter(PinDraft.page_id == page.id)
@@ -571,7 +572,9 @@ def run_generation_job(job_id: int) -> None:
                 pin = db.query(PinDraft).filter(PinDraft.id == pin_id).first()
                 if not pin:
                     continue
-                settings = fill_missing_settings_from_template(pin, db, merge_pin_settings(pin, None))
+                settings = merge_pin_settings(pin, request.render_settings)
+                settings = fill_missing_settings_from_template(pin, db, settings)
+                settings = resolve_page_render_settings(pin.page, settings, pin.selected_image_url)
                 url = loop.run_until_complete(generate_pin_media_url(pin, db, settings))
                 pin.status = "ready" if url else "draft"
                 db.commit()
@@ -647,6 +650,7 @@ def build_render_settings(template: Template, request_settings: Optional[PinRend
         "text_effect_offset_x": int(text_zone_props.get("text_effect_offset_x", 2) or 2),
         "text_effect_offset_y": int(text_zone_props.get("text_effect_offset_y", 2) or 2),
         "text_effect_blur": int(text_zone_props.get("text_effect_blur", 0) or 0),
+        "title_scale": float(text_zone_props.get("title_scale", 1) or 1),
         "custom_font_file": text_zone_props.get("custom_font_file"),
     }
     if request_settings:
@@ -690,6 +694,7 @@ def merge_pin_settings(pin: PinDraft, request_settings: Optional[PinRenderSettin
         "text_effect_offset_x": pin.text_effect_offset_x,
         "text_effect_offset_y": pin.text_effect_offset_y,
         "text_effect_blur": pin.text_effect_blur,
+        "title_scale": None,
         "brand_palette_background_color": request_settings.brand_palette_background_color if request_settings else None,
         "brand_palette_text_color": request_settings.brand_palette_text_color if request_settings else None,
         "brand_palette_effect_color": request_settings.brand_palette_effect_color if request_settings else None,
@@ -731,6 +736,8 @@ def fill_missing_settings_from_template(pin: PinDraft, db: Session, settings: di
         settings["text_effect_offset_y"] = int(props.get("text_effect_offset_y", 2) or 2)
     if settings.get("text_effect_blur") is None:
         settings["text_effect_blur"] = int(props.get("text_effect_blur", 0) or 0)
+    if settings.get("title_scale") is None:
+        settings["title_scale"] = float(props.get("title_scale", 1) or 1)
     if settings.get("text_zone_y") is None and text_zone:
         settings["text_zone_y"] = text_zone.y
     if settings.get("text_zone_height") is None and text_zone:
@@ -756,6 +763,10 @@ def resolve_page_render_settings(
     resolved["text_zone_bg_color"] = normalize_hex_color(resolved.get("text_zone_bg_color"), "#ffffff")
     resolved["text_color"] = normalize_hex_color(resolved.get("text_color"), "#000000")
     resolved["text_effect_color"] = normalize_hex_color(resolved.get("text_effect_color"), "#000000")
+    try:
+        resolved["title_scale"] = max(0.7, min(1.6, float(resolved.get("title_scale", 1) or 1)))
+    except (TypeError, ValueError):
+        resolved["title_scale"] = 1.0
     return resolved
 
 
@@ -1038,16 +1049,65 @@ def _infer_orientation(image: PageImage) -> str:
     return "square"
 
 
+def _resolve_effective_image_settings(
+    site_settings: dict | None,
+    request_image_settings: dict | None = None,
+) -> dict:
+    source = {}
+    settings = site_settings or {}
+    if isinstance(settings.get("image"), dict):
+        source = dict(settings.get("image", {}))
+    elif isinstance(settings.get("image_settings"), dict):
+        source = dict(settings.get("image_settings", {}))
+
+    if isinstance(request_image_settings, dict):
+        source.update(request_image_settings)
+
+    def _bool_any(*keys: str, default: bool = False) -> bool:
+        for key in keys:
+            if key in source:
+                return bool(source.get(key))
+        return default
+
+    def _int_any(*keys: str, default: int = 0) -> int:
+        for key in keys:
+            if key in source:
+                try:
+                    return int(source.get(key))
+                except (TypeError, ValueError):
+                    return default
+        return default
+
+    raw_orientations = (
+        source.get("allowed_orientations")
+        or source.get("allowedOrientations")
+        or source.get("orientations")
+    )
+    if isinstance(raw_orientations, list):
+        allowed_orientations = [
+            str(item).strip().lower()
+            for item in raw_orientations
+            if str(item).strip().lower() in {"portrait", "square", "landscape"}
+        ]
+    else:
+        allowed_orientations = []
+
+    return {
+        "fetch_from_page": _bool_any("fetch_from_page", "fetchFromPage", default=True),
+        "ignore_small_width": _bool_any("ignore_small_width", "ignoreSmallWidth", default=False),
+        "min_width": max(1, _int_any("min_width", "minWidth", default=200)),
+        "ignore_small_height": _bool_any("ignore_small_height", "ignoreSmallHeight", default=False),
+        "min_height": max(1, _int_any("min_height", "minHeight", default=200)),
+        "allowed_orientations": allowed_orientations,
+        "limit_images_per_page": _bool_any("limit_images_per_page", "limitImagesPerPage", default=False),
+    }
+
+
 def apply_generation_image_filters(images: list[PageImage], site_settings: dict | None) -> list[PageImage]:
     """Apply image filters from website generation settings at backend level."""
     if not images:
         return images
-    settings = site_settings or {}
-    image_settings = {}
-    if isinstance(settings.get("image"), dict):
-        image_settings = settings.get("image", {})
-    elif isinstance(settings.get("image_settings"), dict):
-        image_settings = settings.get("image_settings", {})
+    image_settings = _resolve_effective_image_settings(site_settings)
 
     filtered = images
 
@@ -1059,12 +1119,15 @@ def apply_generation_image_filters(images: list[PageImage], site_settings: dict 
         min_height = int(image_settings.get("min_height", 200) or 200)
         filtered = [img for img in filtered if img.height is None or img.height >= min_height]
 
-    orientations = image_settings.get("orientations") or image_settings.get("allowed_orientations")
+    orientations = image_settings.get("allowed_orientations")
     if isinstance(orientations, list):
         allowed = {str(item).strip().lower() for item in orientations if str(item).strip()}
         allowed &= {"portrait", "square", "landscape"}
         if allowed:
             filtered = [img for img in filtered if _infer_orientation(img) in allowed]
+
+    if bool(image_settings.get("limit_images_per_page", False)):
+        filtered = filtered[:3]
 
     return filtered
 
@@ -1242,7 +1305,8 @@ def preview_generation(
             .all()
         )
         site_settings = website_generation_settings.get(page.website_id, {})
-        images = apply_generation_image_filters(images, site_settings)
+        effective_image_settings = _resolve_effective_image_settings(site_settings, request.image_settings or None)
+        images = apply_generation_image_filters(images, {"image_settings": effective_image_settings})
         local_options = dict(request.variation_options or {})
         local_options.setdefault("max_images_per_page", template_image_slots)
         selected_images = choose_images_for_mode(images, request.mode, local_options)

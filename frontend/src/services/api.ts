@@ -218,6 +218,52 @@ export interface ScheduleSettings {
   updated_at: string;
 }
 
+export interface WorkflowStatusResponse {
+  website_id: number;
+  pins_per_day: number;
+  window_days: number;
+  days_ahead_current: number;
+  scheduled_count: number;
+  scheduled_until: string | null;
+  auto_regen_enabled: boolean;
+  desired_gap_days: number;
+  has_active_job: boolean;
+  active_job_id: number | null;
+}
+
+export interface WorkflowPinCountPreviewDay {
+  day: number;
+  count: number;
+}
+
+export interface WorkflowPinCountPreviewResponse {
+  website_id: number;
+  year: number;
+  month: number;
+  base_daily_pin_count: number;
+  days: WorkflowPinCountPreviewDay[];
+}
+
+export interface WorkflowTimeWindowPreviewDay {
+  day: number;
+  start_minutes: number;
+  end_minutes: number;
+  start_time: string;
+  end_time: string;
+}
+
+export interface WorkflowTimeWindowPreviewResponse {
+  website_id: number;
+  year: number;
+  month: number;
+  start_hour: number;
+  end_hour: number;
+  floating_start_end_hours: boolean;
+  start_window_flex_minutes: number;
+  end_window_flex_minutes: number;
+  days: WorkflowTimeWindowPreviewDay[];
+}
+
 export interface AuthStatus {
   authenticated: boolean;
   enabled: boolean;
@@ -251,6 +297,25 @@ export interface KeywordEntry {
   keywords: string;
 }
 
+export interface TrendKeywordUploadResponse {
+  total_rows: number;
+  inserted: number;
+  updated: number;
+  duplicates_skipped: number;
+  errors: string[];
+}
+
+export interface TrendKeywordEntry {
+  id: number;
+  website_id: number;
+  keyword: string;
+  period_type: string;
+  period_value: string | null;
+  weight: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AIModelInfo {
   id: string;
   provider: string;
@@ -279,6 +344,69 @@ export interface GenerationPreview {
 export interface PlaceholderInfo {
   placeholders: Array<{ name: string; description: string }>;
   languages: string[];
+}
+
+export interface PlaygroundPageItem {
+  id: number;
+  url: string;
+  title: string;
+  description: string;
+  alt_text: string;
+  board: string;
+  images: string[];
+}
+
+export interface PlaygroundTemplateItem {
+  id: number;
+  name: string;
+  path: string;
+  image_count: number;
+  thumbnail_url: string;
+}
+
+export interface PlaygroundFontSet {
+  id: string;
+  main: string;
+  secondary: string;
+  accent: string;
+}
+
+export interface PlaygroundSettings {
+  selected_templates: number[];
+  default_template_id?: number | null;
+  font_set: string;
+  font_color: string;
+  title_scale?: number;
+  ai_settings?: Record<string, unknown>;
+  image_settings?: Record<string, unknown>;
+  display_settings?: Record<string, unknown>;
+  advanced_settings?: Record<string, unknown>;
+}
+
+export interface PlaygroundPreviewMeta {
+  title: string;
+  image_title: string;
+  description: string;
+  alt_text: string;
+  board: string;
+  image_url: string;
+  outbound_url: string;
+  template_name: string;
+  template_path: string;
+  font_set_id?: string | null;
+  font_color?: string | null;
+}
+
+export interface PlaygroundScrapeImagesResponse {
+  images: string[];
+  title: string;
+  description: string;
+}
+
+export interface PlaygroundGeneratedContent {
+  title: string;
+  description: string;
+  alt_text: string;
 }
 
 // API Functions
@@ -322,6 +450,13 @@ export const apiClient = {
       errors: string[];
     }>('/keywords/upload', formData);
   },
+  uploadTrendKeywords: (websiteId: number, file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post<TrendKeywordUploadResponse>('/keywords/trend/upload', formData, {
+      params: { website_id: websiteId },
+    });
+  },
   getKeywordsStatus: () => api.get<{
     total_pages: number;
     pages_with_keywords: number;
@@ -334,6 +469,8 @@ export const apiClient = {
     api.patch<KeywordEntry>('/keywords/entries', data),
   deleteKeywordEntry: (url: string) =>
     api.delete('/keywords/entries', { params: { url } }),
+  listTrendKeywords: (websiteId: number) =>
+    api.get<TrendKeywordEntry[]>(`/websites/${websiteId}/trend-keywords`),
 
   // Templates
   listTemplates: () => api.get<Template[]>('/templates'),
@@ -387,9 +524,47 @@ export const apiClient = {
   deleteZone: (templateId: number, zoneId: number) => api.delete(`/templates/${templateId}/zones/${zoneId}`),
   deleteTemplate: (id: number) => api.delete(`/templates/${id}`),
 
+  // Playground
+  getPlaygroundPages: (website_id: number) =>
+    api.get<PlaygroundPageItem[]>('/playground/pages', { params: { website_id } }),
+  getPlaygroundTemplates: () =>
+    api.get<{ templates: PlaygroundTemplateItem[] }>('/playground/templates'),
+  getPlaygroundFonts: () =>
+    api.get<PlaygroundFontSet[]>('/playground/fonts'),
+  getPlaygroundSettings: (website_id: number) =>
+    api.get<PlaygroundSettings>('/playground/settings', { params: { website_id } }),
+  savePlaygroundSettings: (website_id: number, settings: PlaygroundSettings) =>
+    api.post<PlaygroundSettings>('/playground/settings', settings, { params: { website_id } }),
+  getPlaygroundPreview: (params: {
+    website_id: number;
+    page_url: string;
+    template_id: number;
+    font_set_id?: string;
+    font_color?: string;
+    ai_settings?: Record<string, unknown>;
+  }) =>
+    api.get<PlaygroundPreviewMeta>('/playground/preview', {
+      params: {
+        website_id: params.website_id,
+        page_url: params.page_url,
+        template_id: params.template_id,
+        font_set_id: params.font_set_id,
+        font_color: params.font_color,
+        ai_settings: params.ai_settings ? JSON.stringify(params.ai_settings) : undefined,
+      },
+    }),
+  getPlaygroundScrapeImages: (url: string) =>
+    api.get<PlaygroundScrapeImagesResponse>('/playground/scrape-images', { params: { url } }),
+  generatePlaygroundContent: (payload: {
+    website_id: number;
+    page_url: string;
+    ai_settings?: Record<string, unknown>;
+  }) =>
+    api.post<PlaygroundGeneratedContent>('/playground/generate-content', payload),
+
   // Images
   scrapePageImages: (pageId: number) => api.post<PageImage[]>(`/images/pages/${pageId}/scrape`),
-  listImagePages: (params?: { website_id?: number; scrape_status?: string; search?: string; section?: string; sitemap_bucket?: string }) =>
+  listImagePages: (params?: { website_id?: number; scrape_status?: string; search?: string; section?: string; sitemap_bucket?: string; enabled_state?: 'all' | 'enabled' | 'disabled' }) =>
     api.get<ImagePageSummary[]>('/images/pages', { params }),
   scrapePagesBatch: (page_ids: number[]) =>
     api.post<{ total: number; scraped: number; failed: number; errors: string[] }>('/images/pages/scrape', { page_ids }),
@@ -513,8 +688,38 @@ export const apiClient = {
     max_floating_minutes: number;
   }) => api.post<ScheduleSettings>('/schedule', data),
 
+  // Workflow
+  getWorkflowStatus: (website_id: number) =>
+    api.get<WorkflowStatusResponse>('/workflow/status', { params: { website_id } }),
+  generateWorkflowNextBatch: (website_id: number, force = false) =>
+    api.post<{ job_id: number; status: string; message: string; expired_stale_jobs?: number }>(
+      '/workflow/generate-next',
+      null,
+      { params: { website_id, force } },
+    ),
+  getWorkflowPinCountPreview: (params: {
+    website_id: number;
+    year: number;
+    month: number;
+    daily_pin_count?: number;
+    floating_days?: boolean;
+    warmup_month?: boolean;
+  }) =>
+    api.get<WorkflowPinCountPreviewResponse>('/workflow/pin-count-preview', { params }),
+  getWorkflowTimeWindowPreview: (params: {
+    website_id: number;
+    year: number;
+    month: number;
+    start_hour?: number;
+    end_hour?: number;
+    floating_start_end_hours?: boolean;
+    start_window_flex_minutes?: number;
+    end_window_flex_minutes?: number;
+  }) =>
+    api.get<WorkflowTimeWindowPreviewResponse>('/workflow/time-window-preview', { params }),
+
   // Export
-  exportCsv: (data: { selected_only: boolean; pin_ids?: number[] }) =>
+  exportCsv: (data: { selected_only: boolean; pin_ids?: number[]; website_id?: number }) =>
     api.post<{
       pins_count: number;
       file_path: string;

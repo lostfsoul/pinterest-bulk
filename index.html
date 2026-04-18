@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pinterest Pin Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&family=Montserrat:wght@900&family=Oswald:wght@700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', -apple-system, sans-serif; background: #0f1117; color: #e8eaf6; min-height: 100vh; }
+    .app { max-width: 940px; margin: 0 auto; padding: 0 24px 80px; }
+
+    .header { padding: 32px 0 24px; border-bottom: 1px solid #1e2235; margin-bottom: 28px; }
+    .header-inner { display: flex; align-items: center; gap: 16px; }
+    .header-logo { width: 46px; height: 46px; background: #e60023; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+    .header h1 { font-size: 24px; font-weight: 700; color: #fff; letter-spacing: -.4px; }
+    .header-sub { font-size: 13px; color: #6b7280; margin-top: 2px; }
+
+    .main { display: flex; flex-direction: column; gap: 16px; }
+
+    .step-card { background: #13151f; border: 1px solid #1e2235; border-radius: 14px; overflow: hidden; transition: opacity .25s, filter .25s; }
+    .step-card--disabled { opacity: .42; pointer-events: none; filter: saturate(.3); }
+    .step-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: #0d0f18; border-bottom: 1px solid #1e2235; }
+    .step-badge { width: 28px; height: 28px; border-radius: 50%; background: #1e2235; color: #4b5563; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+    .step-badge--active { background: #e60023; color: #fff; }
+    .step-title { font-size: 14px; font-weight: 600; color: #d1d5db; }
+    .step-done { margin-left: auto; color: #4ade80; font-size: 16px; }
+    .step-body { padding: 18px 20px; }
+
+    .upload-zone { border: 2px dashed #1e2235; border-radius: 10px; padding: 24px 20px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; user-select: none; }
+    .upload-zone:hover:not(.upload-zone--disabled) { border-color: #e60023; background: rgba(230,0,35,.04); }
+    .upload-zone--disabled { cursor: not-allowed; }
+    .upload-zone--done { border-color: #22c55e30; border-style: solid; }
+    .upload-icon { font-size: 26px; color: #4b5563; margin-bottom: 6px; }
+    .upload-text { font-size: 13px; color: #6b7280; }
+    .upload-filename { color: #d1d5db; font-weight: 500; }
+    .upload-hint { font-size: 11px; color: #374151; margin-top: 4px; }
+
+    .chips-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+    .chip { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 100px; font-size: 11px; font-weight: 500; }
+    .chip-purple { background: rgba(139,92,246,.15); color: #a78bfa; border: 1px solid rgba(139,92,246,.25); }
+    .chip-blue   { background: rgba(59,130,246,.15);  color: #60a5fa; border: 1px solid rgba(59,130,246,.25); }
+    .chip-orange { background: rgba(245,158,11,.15);  color: #fbbf24; border: 1px solid rgba(245,158,11,.25); }
+    .chip-gray   { background: rgba(107,114,128,.15); color: #9ca3af; border: 1px solid rgba(107,114,128,.25); }
+    .chip-green  { background: rgba(34,197,94,.15);   color: #4ade80; border: 1px solid rgba(34,197,94,.25); }
+    .chip-red    { background: rgba(239,68,68,.15);   color: #f87171; border: 1px solid rgba(239,68,68,.25); }
+
+    .settings-grid { display: flex; flex-direction: column; gap: 13px; }
+    .settings--disabled { opacity: .5; pointer-events: none; }
+    .setting-row { display: flex; align-items: center; gap: 14px; }
+    .setting-label { min-width: 136px; font-size: 12px; color: #9ca3af; font-weight: 500; }
+    .slider-row { display: flex; align-items: center; gap: 10px; flex: 1; }
+    .slider { flex: 1; accent-color: #e60023; cursor: pointer; height: 4px; }
+    .number-input { width: 78px; background: #0d0f18; border: 1px solid #1e2235; border-radius: 6px; color: #e8eaf6; padding: 5px 8px; font-size: 12px; text-align: right; font-family: inherit; }
+    .number-input:focus { outline: none; border-color: #e60023; }
+    .select-input { flex: 1; background: #0d0f18; border: 1px solid #1e2235; border-radius: 6px; color: #e8eaf6; padding: 7px 10px; font-size: 12px; font-family: inherit; cursor: pointer; }
+    .select-input:focus { outline: none; border-color: #e60023; }
+    .color-row { display: flex; align-items: center; gap: 8px; }
+    .color-input { width: 42px; height: 32px; border: 1px solid #1e2235; border-radius: 6px; cursor: pointer; background: #0d0f18; padding: 2px; }
+    .color-hex { width: 90px; background: #0d0f18; border: 1px solid #1e2235; border-radius: 6px; color: #e8eaf6; padding: 5px 8px; font-size: 12px; font-family: monospace; text-transform: uppercase; }
+    .color-hex:focus { outline: none; border-color: #e60023; }
+
+    .preview-section { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .preview-outer { display: flex; justify-content: center; background: #0a0c14; border-radius: 10px; padding: 14px; border: 1px solid #1e2235; width: 100%; }
+    .preview-inner { position: relative; display: inline-block; line-height: 0; width: 40%; max-width: 380px; }
+    .preview-canvas { display: block; width: 100%; height: auto; border-radius: 6px; box-shadow: 0 10px 36px rgba(0,0,0,.6); }
+
+    /* Text zone drag overlay */
+    .zone-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .zone-fill {
+      position: absolute;
+      background: rgba(255, 200, 0, 0.18);
+      border: 2px solid #b8860b;
+      pointer-events: auto;
+      cursor: move;
+      box-sizing: border-box;
+    }
+    /* Edge resize handles — invisible hit targets, cursor only */
+    .zh { position: absolute; left: 0; right: 0; height: 8px; background: transparent; }
+    .zh-top    { top: -4px;    cursor: ns-resize; }
+    .zh-bottom { bottom: -4px; cursor: ns-resize; }
+    .zv { position: absolute; top: 0; bottom: 0; width: 8px; background: transparent; }
+    .zv-left  { left: -4px;  cursor: ew-resize; }
+    .zv-right { right: -4px; cursor: ew-resize; }
+    .zc { display: none; }
+    .zone-label { display: none; }
+    .drag-active * { user-select: none; }
+
+    .row-nav { display: flex; align-items: center; gap: 14px; }
+    .row-indicator { font-size: 12px; color: #6b7280; min-width: 200px; text-align: center; line-height: 1.5; }
+    .row-name { display: block; color: #d1d5db; font-weight: 500; font-size: 13px; }
+
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 8px 18px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; transition: all .18s; text-decoration: none; font-family: inherit; }
+    .btn:disabled { opacity: .42; cursor: not-allowed; }
+    .btn-outline { background: transparent; border: 1px solid #1e2235; color: #d1d5db; }
+    .btn-outline:hover:not(:disabled) { border-color: #374151; background: #1a1d27; }
+    .btn-primary { background: #e60023; color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: #c8001f; }
+    .btn-accent { background: linear-gradient(135deg,#22c55e,#16a34a); color: #fff; }
+    .btn-accent:hover:not(:disabled) { filter: brightness(1.1); }
+    .btn-lg { padding: 13px 28px; font-size: 14px; border-radius: 10px; }
+
+    .generate-section { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+    .progress-wrap { width: 100%; max-width: 440px; }
+    .progress-label { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+    .progress-track { width: 100%; height: 7px; background: #1e2235; border-radius: 4px; overflow: hidden; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg,#e60023,#ff6b6b); border-radius: 4px; transition: width .3s ease; }
+
+    .error-msg { margin-top: 8px; padding: 9px 12px; background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.25); border-radius: 7px; color: #f87171; font-size: 12px; }
+    .warning-msg { padding: 9px 12px; background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.25); border-radius: 7px; color: #fbbf24; font-size: 12px; }
+    .success-banner { padding: 9px 12px; background: rgba(34,197,94,.08); border: 1px solid rgba(34,197,94,.25); border-radius: 7px; color: #4ade80; font-size: 12px; font-weight: 500; }
+    .muted { color: #374151; font-size: 13px; font-style: italic; }
+    .error-list { font-size: 12px; color: #f87171; }
+    .error-list ul { margin-top: 5px; padding-left: 16px; }
+    .error-list li { margin-bottom: 2px; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+  const { useState, useEffect, useRef, useCallback } = React;
+
+  // ─────────────────────────────────────────────────────────
+  //  SVG PARSING — uses clipPath bounding boxes for zones
+  // ─────────────────────────────────────────────────────────
+
+  function parseClipPathBBox(cpEl) {
+    const pathEl = cpEl.querySelector('path');
+    if (pathEl) {
+      const d = pathEl.getAttribute('d') || '';
+      const nums = d.match(/[-\d.]+/g);
+      if (nums && nums.length >= 4) {
+        const pts = [];
+        for (let i = 0; i + 1 < nums.length; i += 2)
+          pts.push({ x: parseFloat(nums[i]), y: parseFloat(nums[i+1]) });
+        const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+        const x = Math.min(...xs), y = Math.min(...ys);
+        const w = Math.max(...xs) - x, h = Math.max(...ys) - y;
+        if (w > 10 && h > 10) return { x, y, width: w, height: h };
+      }
+    }
+    const rectEl = cpEl.querySelector('rect');
+    if (rectEl) {
+      const x = parseFloat(rectEl.getAttribute('x')) || 0;
+      const y = parseFloat(rectEl.getAttribute('y')) || 0;
+      const w = parseFloat(rectEl.getAttribute('width')) || 0;
+      const h = parseFloat(rectEl.getAttribute('height')) || 0;
+      if (w > 10 && h > 10) return { x, y, width: w, height: h };
+    }
+    return null;
+  }
+
+  function getSVGAttr(el, name) {
+    const v = el.getAttribute(name);
+    if (v !== null && v !== '') return v;
+    const style = el.getAttribute('style') || '';
+    const m = style.match(new RegExp('(?:^|;)\\s*' + name.replace('-','\\-') + '\\s*:\\s*([^;]+)', 'i'));
+    return m ? m[1].trim() : null;
+  }
+
+  function parseSVG(svgText) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgText, 'image/svg+xml');
+    const parseErr = doc.querySelector('parsererror');
+    if (parseErr) throw new Error('Invalid SVG');
+    const svg = doc.querySelector('svg');
+    if (!svg) throw new Error('No <svg> element found');
+
+    // Canvas size from viewBox
+    const vb = svg.getAttribute('viewBox');
+    let canvasW = 952, canvasH = 2000;
+    if (vb) {
+      const parts = vb.trim().split(/[\s,]+/).map(Number);
+      if (parts.length >= 4) { canvasW = parts[2]; canvasH = parts[3]; }
+    } else {
+      canvasW = parseFloat(svg.getAttribute('width'))  || canvasW;
+      canvasH = parseFloat(svg.getAttribute('height')) || canvasH;
+    }
+    canvasW = Math.round(canvasW);
+    canvasH = Math.round(canvasH);
+
+    // Build clipPath bounding-box map
+    const cpMap = {};
+    doc.querySelectorAll('clipPath').forEach(cp => {
+      const id = cp.getAttribute('id');
+      const bbox = parseClipPathBBox(cp);
+      if (id && bbox) cpMap[id] = bbox;
+    });
+
+    // For each <image>, walk up ancestors and collect all clip-path ancestors.
+    // The LAST one found (outermost in DOM) defines the visible zone.
+    const imgEls = Array.from(doc.querySelectorAll('image'));
+    const zones = [];
+    imgEls.forEach(imgEl => {
+      let el = imgEl.parentElement;
+      let outermostBBox = null;
+      while (el && el !== svg) {
+        const cpAttr = el.getAttribute('clip-path');
+        if (cpAttr) {
+          const m = cpAttr.match(/url\(#([^)]+)\)/);
+          if (m && cpMap[m[1]]) outermostBBox = cpMap[m[1]];
+        }
+        el = el.parentElement;
+      }
+      if (outermostBBox) zones.push({ ...outermostBBox });
+    });
+    // Sort by y-position
+    zones.sort((a, b) => a.y - b.y);
+
+    // Text elements (may be empty for path-based SVGs)
+    const textElements = Array.from(doc.querySelectorAll('text')).map(t => ({
+      content:    t.textContent.trim(),
+      x:          parseFloat(getSVGAttr(t, 'x'))          || 0,
+      y:          parseFloat(getSVGAttr(t, 'y'))          || 0,
+      fontSize:   parseFloat(getSVGAttr(t, 'font-size'))  || 16,
+      fontWeight: getSVGAttr(t, 'font-weight') || 'normal',
+      fontFamily: getSVGAttr(t, 'font-family') || 'sans-serif',
+      fill:       getSVGAttr(t, 'fill')        || '#000000',
+      textAnchor: getSVGAttr(t, 'text-anchor') || 'start',
+    }));
+
+    // Detect text zone from SVG clipPaths — look for a wide clipPath
+    // centred in the gap between the two image zones (more accurate than pure gap math)
+    let textZoneY = Math.round(canvasH * 0.44);
+    let textZoneH = Math.round(canvasH * 0.12);
+
+    if (zones.length >= 2) {
+      const bottom1   = zones[0].y + zones[0].height;
+      const top2      = zones[1].y;
+      const gapCenter = (bottom1 + top2) / 2;
+
+      // Find the best-matching clipPath: wide, short, centred in the gap
+      let bestCP = null, bestArea = 0;
+      for (const bbox of Object.values(cpMap)) {
+        if (bbox.width  < canvasW * 0.5) continue;   // must span most of canvas width
+        if (bbox.height > canvasH * 0.25) continue;  // must not be a full image zone
+        const cpCenter = bbox.y + bbox.height / 2;
+        if (cpCenter < bottom1 - 40 || cpCenter > top2 + 40) continue; // near the gap
+        const area = bbox.width * bbox.height;
+        if (area > bestArea) { bestArea = area; bestCP = bbox; }
+      }
+
+      if (bestCP) {
+        textZoneY = Math.round(bestCP.y);
+        textZoneH = Math.round(bestCP.height);
+      } else if (top2 > bottom1) {
+        textZoneY = Math.round(bottom1);
+        textZoneH = Math.round(top2 - bottom1);
+      }
+    } else if (zones.length === 1) {
+      textZoneY = Math.round(zones[0].y + zones[0].height);
+      textZoneH = Math.round(canvasH * 0.12);
+    }
+
+    // ── Detect text color BEFORE stripping (glyphs are removed next) ──
+    // Templates have two layers: shadow (fill-opacity < 1) + actual text (fill-opacity="1").
+    // Prefer highest-opacity fill found in the text zone glyph groups.
+    let textZoneTextColor = null;
+    let textZoneTextColorOpacity = 0;
+    const tzTopD    = textZoneY - 10;
+    const tzBottomD = textZoneY + textZoneH + 10;
+    Array.from(doc.querySelectorAll('g[fill-opacity]')).forEach(g => {
+      if (g.getAttribute('clip-path')) return;
+      if (g.getAttribute('transform')) return;
+      const child = g.querySelector(':scope > g[transform]');
+      if (!child) return;
+      const t  = child.getAttribute('transform') || '';
+      const mm = t.match(/translate\(\s*[\d.-]+\s*,\s*([\d.-]+)\s*\)/);
+      if (!mm) return;
+      const ty = parseFloat(mm[1]);
+      if (ty < tzTopD || ty > tzBottomD) return;
+      const fill    = g.getAttribute('fill');
+      const opacity = parseFloat(g.getAttribute('fill-opacity') || '1');
+      if (fill && fill !== 'none' && opacity > textZoneTextColorOpacity) {
+        textZoneTextColor        = fill.toLowerCase();
+        textZoneTextColorOpacity = opacity;
+      }
+    });
+
+    // ── Build stripped SVG for overlay ──
+
+    // 1. Remove <image> placeholder elements — recipe images fill those zones
+    Array.from(doc.querySelectorAll('image')).forEach(el => el.remove());
+
+    // 2. Remove large white background rects that extend beyond canvas (x<0 or y<0)
+    Array.from(doc.querySelectorAll('rect')).forEach(r => {
+      const x = parseFloat(r.getAttribute('x') || 0);
+      const y = parseFloat(r.getAttribute('y') || 0);
+      if (x < -5 || y < -5) r.remove();
+    });
+
+    // 3. Remove "TITLE HERE..." placeholder text — Canva exports title placeholders
+    //    as hundreds of black path glyphs inside <g fill="#000000"> groups whose
+    //    child transforms have a Y coordinate inside the text zone.
+    //    We strip those here so they don't paint over the recipe title.
+    const tzTop    = textZoneY - 20;
+    const tzBottom = textZoneY + textZoneH + 20;
+    // Canva renders each letter as a <path> inside nested <g translate(x,y)> groups.
+    // Outer <g> has fill-opacity (any value) but no clip-path or transform of its own.
+    // Different templates use fill-opacity="1", "0.4", etc. — match any value.
+    // Use tight bounds (tzTop/tzBottom) to avoid removing footer/URL text nearby.
+    const tzTopStrict    = textZoneY - 10;
+    const tzBottomStrict = textZoneY + textZoneH + 10;
+    Array.from(doc.querySelectorAll('g[fill-opacity]')).forEach(g => {
+      if (g.getAttribute('clip-path')) return;   // structural clip group — skip
+      if (g.getAttribute('transform')) return;   // already-transformed group — skip
+      const child = g.querySelector(':scope > g[transform]');
+      if (!child) return;
+      const t = child.getAttribute('transform') || '';
+      const m = t.match(/translate\(\s*[\d.-]+\s*,\s*([\d.-]+)\s*\)/);
+      if (!m) return;
+      const ty = parseFloat(m[1]);
+      if (ty >= tzTopStrict && ty <= tzBottomStrict) g.remove();
+    });
+
+    // 4. Detect text zone border from SVG stroke elements in clip-paths near the text zone
+    //    (Canva/Blogtopin templates render the text box frame as a stroked path)
+    let textZoneBorderColor = null;
+    let textZoneBorderWidth = 2;
+    for (const [id, bbox] of Object.entries(cpMap)) {
+      // Match clipPaths that closely wrap the text zone
+      if (Math.abs(bbox.y - textZoneY) > 60) continue;
+      if (Math.abs(bbox.height - textZoneH) > 60) continue;
+      if (bbox.width < canvasW * 0.5) continue;
+      const clippedG = doc.querySelector(`[clip-path="url(#${id})"]`);
+      if (!clippedG) continue;
+      // Find a stroke-only path (fill="none") — this is the border frame
+      const strokeEl = clippedG.querySelector('[stroke]:not([stroke="none"])');
+      if (!strokeEl) continue;
+      const fillVal = strokeEl.getAttribute('fill');
+      if (fillVal && fillVal !== 'none') continue; // must be stroke-only
+      const stroke = strokeEl.getAttribute('stroke');
+      if (!stroke || stroke === 'none') continue;
+      const sw = parseFloat(strokeEl.getAttribute('stroke-width') || 2);
+      // Get scale from transform on this element or parent
+      const tfm = (strokeEl.getAttribute('transform') || clippedG.querySelector('[transform]')?.getAttribute('transform') || '');
+      const mScale = tfm.match(/matrix\(\s*([\d.]+)/);
+      const scale  = mScale ? parseFloat(mScale[1]) : 1;
+      textZoneBorderColor = stroke;
+      textZoneBorderWidth = 4;
+      break;
+    }
+
+    // 6. Fix SVG root dimensions to match viewBox so it renders at the right size
+    svg.setAttribute('width',  String(canvasW));
+    svg.setAttribute('height', String(canvasH));
+    const strippedSvgText = new XMLSerializer().serializeToString(doc);
+
+    return { canvasW, canvasH, zones, textElements, textZoneY, textZoneH,
+             textZoneBorderColor, textZoneBorderWidth, textZoneTextColor, strippedSvgText };
+  }
+
+  // Pre-render stripped SVG to an offscreen canvas (done once on upload)
+  async function preRenderOverlay(svgData) {
+    const { canvasW, canvasH, strippedSvgText } = svgData;
+    const blob = new Blob([strippedSvgText], { type: 'image/svg+xml' });
+    const url  = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise((res, rej) => {
+        const i = new Image();
+        i.onload  = () => res(i);
+        i.onerror = () => res(null);  // graceful fallback
+        i.src = url;
+      });
+      URL.revokeObjectURL(url);
+      if (!img) return null;
+      const oc = document.createElement('canvas');
+      oc.width  = canvasW;
+      oc.height = canvasH;
+      oc.getContext('2d').drawImage(img, 0, 0, canvasW, canvasH);
+      return oc;
+    } catch (e) {
+      URL.revokeObjectURL(url);
+      return null;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────
+  //  CANVAS RENDERING
+  // ─────────────────────────────────────────────────────────
+
+  function drawCoverCenter(ctx, img, zoneX, zoneY, zoneW, zoneH) {
+    if (!img || !img.naturalWidth || !img.naturalHeight) return;
+    const scale = Math.max(zoneW / img.naturalWidth, zoneH / img.naturalHeight);
+    const sw    = img.naturalWidth  * scale;
+    const sh    = img.naturalHeight * scale;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(zoneX, zoneY, zoneW, zoneH);
+    ctx.clip();
+    ctx.drawImage(img, zoneX - (sw - zoneW) / 2, zoneY - (sh - zoneH) / 2, sw, sh);
+    ctx.restore();
+  }
+
+  // Find the largest font size at which `lines` all fit within usableW × usableH
+  function findMaxFontSize(ctx, lines, usableW, usableH, fontFamily) {
+    let lo = 12, hi = 200, best = 12;
+    while (lo <= hi) {
+      const mid    = Math.floor((lo + hi) / 2);
+      ctx.font     = `900 ${mid}px ${fontFamily}`;
+      const lineH  = mid * 1.0;   // must match the draw step (line spacing = 1)
+      const totalH = lines.length * lineH;
+      const maxW   = Math.max(...lines.map(l => ctx.measureText(l).width));
+      if (maxW <= usableW && totalH <= usableH) { best = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return best;
+  }
+
+  // Pick the 1-line, 2-line or 3-line layout that gives the LARGEST font size.
+  // The zone dimensions do all the work:
+  //   - narrow zone  → 1 long line is tiny, 2 balanced lines win
+  //   - short zone   → 3 lines are height-constrained, 2 lines win
+  //   - wide+tall    → 1 line fits at a large font and wins
+  // No arbitrary threshold — pure max-font selection.
+  function fitTitle(ctx, text, zoneW, zoneH, fontFamily) {
+    const upper   = text.toUpperCase();
+    const usableW = zoneW - 30;  // 15 px padding each side
+    const usableH = zoneH;       // no vertical padding — fill the full zone height
+    const words   = upper.split(' ');
+
+    let best = { lines: [upper], fontSize: 14 };
+
+    const maxLineWidth = (lines, fs) => {
+      ctx.font = `900 ${fs}px ${fontFamily}`;
+      return Math.max(...lines.map(l => ctx.measureText(l).width));
+    };
+
+    const tryLines = (lines) => {
+      const fs = findMaxFontSize(ctx, lines, usableW, usableH, fontFamily);
+      if (fs > best.fontSize) {
+        best = { lines, fontSize: fs };
+      } else if (fs === best.fontSize && lines.length === best.lines.length) {
+        // Tie: pick the most balanced split (smallest max-line-width wins)
+        if (maxLineWidth(lines, fs) < maxLineWidth(best.lines, fs))
+          best = { lines, fontSize: fs };
+      }
+    };
+
+    // 1 line (always tried)
+    tryLines([upper]);
+
+    // 2-line splits (every possible word-group boundary)
+    if (words.length >= 2) {
+      for (let i = 1; i < words.length; i++) {
+        tryLines([words.slice(0, i).join(' '), words.slice(i).join(' ')]);
+      }
+    }
+
+    // 3-line splits (only for titles with 4+ words to avoid trivial 1-word lines)
+    if (words.length >= 4) {
+      for (let i = 1; i < words.length - 1; i++) {
+        for (let j = i + 1; j < words.length; j++) {
+          tryLines([
+            words.slice(0, i).join(' '),
+            words.slice(i, j).join(' '),
+            words.slice(j).join(' '),
+          ]);
+        }
+      }
+    }
+
+    return best;
+  }
+
+  // (kept for any remaining internal uses)
+  function fitFontSize(ctx, lines, zoneW, zoneH, fontFamily) {
+    return findMaxFontSize(ctx, lines, zoneW - 80, zoneH - 20, fontFamily);
+  }
+  function loadImage(url) {
+    return new Promise(resolve => {
+      if (!url) return resolve({ img: null, tainted: false });
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload  = () => resolve({ img, tainted: false });
+      img.onerror = () => {
+        const img2 = new Image();
+        img2.onload  = () => resolve({ img: img2, tainted: true });
+        img2.onerror = () => resolve({ img: null, tainted: false });
+        img2.src = url;
+      };
+      img.src = url;
+    });
+  }
+
+  async function ensureFontLoaded(fontFamily) {
+    try {
+      const name = fontFamily.match(/"([^"]+)"/)?.[1] ||
+                   fontFamily.split(',')[0].replace(/"/g, '').trim();
+      if (['Impact','Arial Black','Arial','Haettenschweiler','Archive'].includes(name)) return;
+      await document.fonts.load(`900 64px "${name}"`);
+    } catch (e) { /* ignore */ }
+  }
+
+  async function renderPin(row, svgData, overlayCanvas, settings) {
+    const { canvasW, canvasH, zones, textElements } = svgData;
+    const { textZoneY, textZoneH, textZonePadLeft = 0, textZonePadRight = 0, fontFamily, textColor } = settings;
+    const padL = textZonePadLeft;
+    const padR = textZonePadRight;
+
+    await ensureFontLoaded(fontFamily);
+
+    const canvas = document.createElement('canvas');
+    canvas.width  = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+
+    // 1. White background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    // 2. Load recipe images
+    const [r1, r2] = await Promise.all([
+      loadImage(row.image1url),
+      loadImage(row.image2url),
+    ]);
+
+    // 3. Draw recipe image into zone 1
+    if (zones[0] && r1.img) {
+      const z = zones[0];
+      drawCoverCenter(ctx, r1.img, z.x, z.y, z.width, z.height);
+    }
+    // 4. Draw recipe image into zone 2
+    if (zones[1] && r2.img) {
+      const z = zones[1];
+      drawCoverCenter(ctx, r2.img, z.x, z.y, z.width, z.height);
+    }
+
+    // 5. Draw text zone white background first (fallback + base for overlay decorations)
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(padL, textZoneY, canvasW - padL - padR, textZoneH);
+
+    // 6. Draw template overlay on top — its decorations (side bars, border, footer)
+    //    paint over the white rect, which is exactly what the SVG template intends
+    if (overlayCanvas) {
+      ctx.drawImage(overlayCanvas, 0, 0);
+    }
+
+    // 7. Draw text zone border frame (guaranteed — works even if overlay fails)
+    if (svgData.textZoneBorderColor) {
+      const bw   = svgData.textZoneBorderWidth || 4;
+      const half = bw / 2;
+      ctx.save();
+      ctx.strokeStyle = svgData.textZoneBorderColor;
+      ctx.lineWidth   = bw;
+      ctx.strokeRect(padL + half, textZoneY + half, textAreaW - bw, textZoneH - bw);
+      ctx.restore();
+    }
+
+    // 9. Draw SVG text elements if any (brand/footer)
+    textElements.forEach(t => {
+      if (!t.content) return;
+      ctx.save();
+      ctx.font         = `${t.fontWeight !== 'normal' ? t.fontWeight + ' ' : ''}${t.fontSize}px ${t.fontFamily}`;
+      ctx.fillStyle    = t.fill;
+      ctx.textAlign    = t.textAnchor === 'middle' ? 'center' : t.textAnchor === 'end' ? 'right' : 'left';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(t.content, t.x, t.y);
+      ctx.restore();
+    });
+
+    // 10. Draw title text — auto 1-line / 2-line / 3-line, maximised font, true vertical centre
+    const textAreaW           = canvasW - padL - padR;
+    const centerX             = padL + textAreaW / 2;
+    const { lines, fontSize } = fitTitle(ctx, row.recipeName, textAreaW, textZoneH, fontFamily);
+    const lineH               = fontSize * 1.0;  // line spacing = 1 (no extra gap)
+
+    ctx.font         = `900 ${fontSize}px ${fontFamily}`;
+    ctx.fillStyle    = textColor;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'alphabetic';
+
+    // Use actual cap-height metrics so uppercase text is truly centred
+    // (textBaseline='middle' centres the em-box, not the visible caps)
+    const m          = ctx.measureText('A');
+    const capAscent  = m.actualBoundingBoxAscent  || fontSize * 0.72;
+    const capDescent = m.actualBoundingBoxDescent || 0;
+    const capH       = capAscent + capDescent;
+    // Visual block: cap height of first line + lineH gaps to remaining lines
+    const visualH    = capH + (lines.length - 1) * lineH;
+    // First baseline: position so the visual block is centred in the zone
+    const firstBase  = textZoneY + (textZoneH - visualH) / 2 + capAscent;
+
+    lines.forEach((line, i) => ctx.fillText(line, centerX, firstBase + i * lineH));
+
+    const tainted = !!(r1.tainted || r2.tainted);
+    return { canvas, tainted };
+  }
+
+  function sanitizeFilename(name) {
+    return name.replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
+  }
+
+  // ─────────────────────────────────────────────────────────
+  //  FONT OPTIONS
+  // ─────────────────────────────────────────────────────────
+  const FONTS = [
+    { label: 'Archive Regular',  value: 'Archive, Impact, sans-serif' },
+    { label: 'Impact',           value: 'Impact, Haettenschweiler, sans-serif' },
+    { label: 'Bebas Neue',       value: '"Bebas Neue", Impact, sans-serif' },
+    { label: 'Oswald Bold',      value: '"Oswald", Impact, sans-serif' },
+    { label: 'Montserrat Black', value: '"Montserrat", Arial Black, sans-serif' },
+    { label: 'Arial Black',      value: '"Arial Black", Arial, sans-serif' },
+  ];
+
+  // ─────────────────────────────────────────────────────────
+  //  TEXT ZONE DRAG OVERLAY
+  // ─────────────────────────────────────────────────────────
+  function TextZoneOverlay({ settings, canvasH, canvasW, onUpdate }) {
+    const overlayRef   = useRef(null);
+    const draggingRef  = useRef(null);
+    const dragStartRef = useRef(null);
+
+    const padL      = settings.textZonePadLeft  || 0;
+    const padR      = settings.textZonePadRight || 0;
+    const topPct    = (settings.textZoneY / canvasH) * 100;
+    const heightPct = (settings.textZoneH / canvasH) * 100;
+    const leftPct   = (padL / canvasW) * 100;
+    const rightPct  = (padR / canvasW) * 100;
+
+    const startDrag = useCallback((type, e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      draggingRef.current  = type;
+      dragStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        zoneY:   settings.textZoneY,
+        zoneH:   settings.textZoneH,
+        padL:    settings.textZonePadLeft  || 0,
+        padR:    settings.textZonePadRight || 0,
+      };
+      document.body.classList.add('drag-active');
+
+      const onMove = (ev) => {
+        if (!draggingRef.current || !dragStartRef.current || !overlayRef.current) return;
+        const rect   = overlayRef.current.getBoundingClientRect();
+        const scaleY = canvasH / rect.height;
+        const scaleX = canvasW / rect.width;
+        const dy = (ev.clientY - dragStartRef.current.clientY) * scaleY;
+        const dx = (ev.clientX - dragStartRef.current.clientX) * scaleX;
+        const { zoneY, zoneH, padL: sL, padR: sR } = dragStartRef.current;
+        const type = draggingRef.current;
+
+        if (type === 'top') {
+          const newY = Math.max(0, Math.min(canvasH - 40, zoneY + dy));
+          onUpdate('textZoneY', Math.round(newY));
+          onUpdate('textZoneH', Math.max(40, Math.round(zoneH - (newY - zoneY))));
+        } else if (type === 'bottom') {
+          onUpdate('textZoneH', Math.max(40, Math.min(canvasH - zoneY - 1, Math.round(zoneH + dy))));
+        } else if (type === 'left') {
+          const maxPad = canvasW / 2 - 20;
+          onUpdate('textZonePadLeft',  Math.round(Math.max(0, Math.min(maxPad, sL + dx))));
+        } else if (type === 'right') {
+          const maxPad = canvasW / 2 - 20;
+          onUpdate('textZonePadRight', Math.round(Math.max(0, Math.min(maxPad, sR - dx))));
+        } else { // move whole zone
+          onUpdate('textZoneY', Math.max(0, Math.min(canvasH - zoneH, Math.round(zoneY + dy))));
+        }
+      };
+
+      const onUp = () => {
+        draggingRef.current  = null;
+        dragStartRef.current = null;
+        document.body.classList.remove('drag-active');
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    }, [settings.textZoneY, settings.textZoneH,
+        settings.textZonePadLeft, settings.textZonePadRight, canvasH, canvasW, onUpdate]);
+
+    return (
+      <div ref={overlayRef} className="zone-overlay">
+        <div
+          className="zone-fill"
+          style={{ top: topPct + '%', height: heightPct + '%', left: leftPct + '%', right: rightPct + '%' }}
+          onMouseDown={e => startDrag('move', e)}
+        >
+          {/* Edge handles */}
+          <div className="zh zh-top"    onMouseDown={e => startDrag('top',    e)} />
+          <div className="zh zh-bottom" onMouseDown={e => startDrag('bottom', e)} />
+          <div className="zv zv-left"   onMouseDown={e => startDrag('left',   e)} />
+          <div className="zv zv-right"  onMouseDown={e => startDrag('right',  e)} />
+          {/* Corner dots */}
+          <div className="zc zc-tl" onMouseDown={e => startDrag('top',    e)} />
+          <div className="zc zc-tr" onMouseDown={e => startDrag('top',    e)} />
+          <div className="zc zc-bl" onMouseDown={e => startDrag('bottom', e)} />
+          <div className="zc zc-br" onMouseDown={e => startDrag('bottom', e)} />
+        </div>
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────
+  //  SMALL REUSABLE COMPONENTS
+  // ─────────────────────────────────────────────────────────
+
+  function StepCard({ number, title, active, done, children }) {
+    return (
+      <div className={`step-card${active ? '' : ' step-card--disabled'}`}>
+        <div className="step-header">
+          <span className={`step-badge${active ? ' step-badge--active' : ''}`}>{number}</span>
+          <h2 className="step-title">{title}</h2>
+          {done && <span className="step-done">✓</span>}
+        </div>
+        <div className="step-body">{children}</div>
+      </div>
+    );
+  }
+
+  function FileUploadZone({ accept, label, fileName, onChange, disabled }) {
+    const inputRef = useRef(null);
+    return (
+      <div
+        className={`upload-zone${disabled ? ' upload-zone--disabled' : ''}${fileName ? ' upload-zone--done' : ''}`}
+        onClick={() => !disabled && inputRef.current && inputRef.current.click()}
+      >
+        <input ref={inputRef} type="file" accept={accept}
+          onChange={onChange} style={{ display:'none' }} disabled={disabled} />
+        <div className="upload-icon">{fileName ? '✔' : '↑'}</div>
+        <div className="upload-text">
+          {fileName ? <span className="upload-filename">{fileName}</span>
+                    : <span>{label}</span>}
+        </div>
+        {fileName && <div className="upload-hint">Click to replace</div>}
+      </div>
+    );
+  }
+
+  function SVGSummary({ data }) {
+    const { canvasW, canvasH, zones, textElements, textZoneY, textZoneH, textZoneBorderColor, textZoneBorderWidth } = data;
+    const brand = textElements.find(t => t.content)?.content || null;
+    return (
+      <div className="chips-row">
+        <span className="chip chip-purple">Canvas: {canvasW}×{canvasH}</span>
+        {zones[0] && <span className="chip chip-blue">Zone 1: y={Math.round(zones[0].y)} h={Math.round(zones[0].height)}</span>}
+        {zones[1] && <span className="chip chip-blue">Zone 2: y={Math.round(zones[1].y)} h={Math.round(zones[1].height)}</span>}
+        {zones.length === 0 && <span className="chip chip-red">No image zones detected</span>}
+        <span className="chip chip-orange">Text zone: y={textZoneY} h={textZoneH}</span>
+        {textZoneBorderColor && <span className="chip chip-gray">Border: {textZoneBorderColor} {textZoneBorderWidth}px</span>}
+        {brand && <span className="chip chip-orange">Brand: {brand}</span>}
+        <span className="chip chip-gray">{textElements.length} text · {zones.length} zones</span>
+      </div>
+    );
+  }
+
+  function SliderInput({ label, value, min, max, onChange, disabled }) {
+    return (
+      <div className="setting-row">
+        <label className="setting-label">{label}</label>
+        <div className="slider-row">
+          <input type="range" className="slider" value={value} min={min} max={max}
+            onChange={e => onChange(Number(e.target.value))} disabled={disabled} />
+          <input type="number" className="number-input" value={value} min={min} max={max}
+            onChange={e => onChange(Math.max(min, Math.min(max, Number(e.target.value))))}
+            disabled={disabled} />
+        </div>
+      </div>
+    );
+  }
+
+  function TextZoneSettings({ settings, svgData, onChange, disabled }) {
+    const canvasH = svgData?.canvasH || 2000;
+    return (
+      <div className={`settings-grid${disabled ? ' settings--disabled' : ''}`}>
+        <SliderInput label="Zone Y Position" value={settings.textZoneY}
+          min={0} max={canvasH} onChange={v => onChange('textZoneY', v)} disabled={disabled} />
+        <SliderInput label="Zone Height" value={settings.textZoneH}
+          min={20} max={400} onChange={v => onChange('textZoneH', v)} disabled={disabled} />
+        <SliderInput label="Left Padding (px)" value={settings.textZonePadLeft || 0}
+          min={0} max={Math.round((svgData?.canvasW || 950) * 0.4)} onChange={v => onChange('textZonePadLeft', v)} disabled={disabled} />
+        <SliderInput label="Right Padding (px)" value={settings.textZonePadRight || 0}
+          min={0} max={Math.round((svgData?.canvasW || 950) * 0.4)} onChange={v => onChange('textZonePadRight', v)} disabled={disabled} />
+        <div className="setting-row">
+          <label className="setting-label">Font Family</label>
+          <select className="select-input" value={settings.fontFamily}
+            onChange={e => onChange('fontFamily', e.target.value)} disabled={disabled}>
+            {FONTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+          </select>
+        </div>
+        <div className="setting-row">
+          <label className="setting-label">Text Colour</label>
+          <div className="color-row">
+            <input type="color" className="color-input" value={settings.textColor}
+              onChange={e => onChange('textColor', e.target.value)} disabled={disabled} />
+            <input type="text" className="color-hex"
+              value={settings.textColor.toUpperCase()}
+              onChange={e => {
+                const v = e.target.value.trim();
+                if (/^#[0-9a-fA-F]{6}$/.test(v)) onChange('textColor', v.toLowerCase());
+              }}
+              onBlur={e => {
+                let v = e.target.value.trim();
+                if (!v.startsWith('#')) v = '#' + v;
+                if (/^#[0-9a-fA-F]{6}$/.test(v)) onChange('textColor', v.toLowerCase());
+              }}
+              maxLength={7} disabled={disabled} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────
+  //  MAIN APP
+  // ─────────────────────────────────────────────────────────
+
+  function App() {
+    const [svgData,       setSvgData]       = useState(null);
+    const [svgName,       setSvgName]       = useState('');
+    const [overlayCanvas, setOverlayCanvas] = useState(null);
+    const [overlayLoading,setOverlayLoading]= useState(false);
+
+    const [rows,      setRows]      = useState(null);
+    const [xlsxName,  setXlsxName]  = useState('');
+    const [xlsxError, setXlsxError] = useState('');
+
+    const [settings, setSettings] = useState({
+      textZoneY:        0,    // overwritten by parseSVG on upload
+      textZoneH:        120,  // overwritten by parseSVG on upload
+      textZonePadLeft:  0,
+      textZonePadRight: 0,
+      fontFamily:  '"Bebas Neue", Impact, sans-serif',
+      textColor:   '#000000',
+    });
+
+    const [currentRow,  setCurrentRow]  = useState(0);
+    const [corsWarning, setCorsWarning] = useState(false);
+    const [generating,  setGenerating]  = useState(false);
+    const [progress,    setProgress]    = useState({ current: 0, total: 0 });
+    const [zipUrl,      setZipUrl]      = useState(null);
+    const [genErrors,   setGenErrors]   = useState([]);
+
+    const previewCanvasRef = useRef(null);
+
+    // ── SVG Upload ──
+    const handleSVGUpload = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setSvgName(file.name);
+      setOverlayCanvas(null);
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        try {
+          const data = parseSVG(ev.target.result);
+          setSvgData(data);
+          // Use auto-detected text zone as default
+          setSettings(s => ({
+            ...s,
+            textZoneY:  data.textZoneY,
+            textZoneH:  data.textZoneH,
+            ...(data.textZoneTextColor ? { textColor: data.textZoneTextColor } : {}),
+          }));
+          setCurrentRow(0);
+          setZipUrl(null);
+          // Pre-render overlay async
+          setOverlayLoading(true);
+          const oc = await preRenderOverlay(data);
+          setOverlayCanvas(oc);
+          setOverlayLoading(false);
+        } catch (err) {
+          alert('SVG parse error: ' + err.message);
+          setOverlayLoading(false);
+        }
+      };
+      reader.readAsText(file);
+      e.target.value = '';
+    };
+
+    // ── XLSX Upload ──
+    const handleXLSXUpload = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      setXlsxName(file.name);
+      setXlsxError('');
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try {
+          const wb   = XLSX.read(ev.target.result, { type: 'array' });
+          const ws   = wb.Sheets[wb.SheetNames[0]];
+          const data = XLSX.utils.sheet_to_json(ws, { defval: '' });
+          if (!data.length) { setXlsxError('Spreadsheet is empty.'); return; }
+
+          const required = ['Recipe Name', 'Image1_url', 'Image2_url'];
+          const missing  = required.filter(r => !Object.keys(data[0]).includes(r));
+          if (missing.length) {
+            setXlsxError('Missing columns: ' + missing.join(', '));
+            setRows(null); return;
+          }
+
+          const valid = data
+            .map(r => ({
+              recipeName: String(r['Recipe Name'] || '').trim(),
+              image1url:  String(r['Image1_url']  || '').trim(),
+              image2url:  String(r['Image2_url']  || '').trim(),
+            }))
+            .filter(r => r.recipeName && r.recipeName !== 'nan'
+                      && r.image1url  && r.image1url  !== 'nan'
+                      && r.image2url  && r.image2url  !== 'nan');
+
+          if (!valid.length) {
+            setXlsxError('No valid rows found.');
+            setRows(null); return;
+          }
+          setRows(valid);
+          setCurrentRow(0);
+          setZipUrl(null);
+          setGenErrors([]);
+        } catch (err) { setXlsxError('Error reading file: ' + err.message); }
+      };
+      reader.readAsArrayBuffer(file);
+      e.target.value = '';
+    };
+
+    const updateSetting = useCallback((key, value) =>
+      setSettings(s => ({ ...s, [key]: value })), []);
+
+    // ── Auto-load input.xlsx on mount ──
+    const processXlsxBuffer = useCallback((arrayBuffer, name) => {
+      try {
+        const wb   = XLSX.read(arrayBuffer, { type: 'array' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { defval: '' });
+        if (!data.length) return;
+        const required = ['Recipe Name', 'Image1_url', 'Image2_url'];
+        if (required.some(r => !Object.keys(data[0]).includes(r))) return;
+        const valid = data
+          .map(r => ({
+            recipeName: String(r['Recipe Name'] || '').trim(),
+            image1url:  String(r['Image1_url']  || '').trim(),
+            image2url:  String(r['Image2_url']  || '').trim(),
+          }))
+          .filter(r => r.recipeName && r.recipeName !== 'nan'
+                    && r.image1url  && r.image1url  !== 'nan'
+                    && r.image2url  && r.image2url  !== 'nan');
+        if (!valid.length) return;
+        setXlsxName(name);
+        setXlsxError('');
+        setRows(valid);
+        setCurrentRow(0);
+        setZipUrl(null);
+      } catch (e) { /* silent — auto-load best-effort */ }
+    }, []);
+
+    useEffect(() => {
+      fetch('./input.xlsx')
+        .then(r => r.ok ? r.arrayBuffer() : Promise.reject())
+        .then(buf => processXlsxBuffer(buf, 'input.xlsx'))
+        .catch(() => { /* file not found or fetch blocked — user uploads manually */ });
+    }, [processXlsxBuffer]);
+
+    // ── Live Preview ──
+    useEffect(() => {
+      if (!svgData || !rows || !rows.length) return;
+      if (overlayLoading) return; // wait for overlay to be ready
+      const row = rows[currentRow];
+      let cancelled = false;
+
+      renderPin(row, svgData, overlayCanvas, settings).then(({ canvas, tainted }) => {
+        if (cancelled) return;
+        setCorsWarning(tainted);
+        const el = previewCanvasRef.current;
+        if (!el) return;
+        el.width  = canvas.width;
+        el.height = canvas.height;
+        el.getContext('2d').drawImage(canvas, 0, 0);
+      }).catch(err => console.error('Preview error:', err));
+
+      return () => { cancelled = true; };
+    }, [svgData, rows, currentRow, settings, overlayCanvas, overlayLoading]);
+
+    // ── Generate All ──
+    const handleGenerate = async () => {
+      if (!svgData || !rows) return;
+      setGenerating(true);
+      setProgress({ current: 0, total: rows.length });
+      setZipUrl(null);
+      setGenErrors([]);
+
+      const zip    = new JSZip();
+      const errors = [];
+
+      for (let i = 0; i < rows.length; i++) {
+        setProgress({ current: i + 1, total: rows.length });
+        try {
+          const { canvas } = await renderPin(rows[i], svgData, overlayCanvas, settings);
+          const blob = await new Promise((res, rej) => {
+            try { canvas.toBlob(b => b ? res(b) : rej(new Error('toBlob failed')), 'image/png'); }
+            catch (ex) { rej(ex); }
+          });
+          zip.file(sanitizeFilename(rows[i].recipeName) + '.png', blob);
+        } catch (err) {
+          errors.push(`Row ${i+1} "${rows[i].recipeName}": ${err.message}`);
+        }
+      }
+
+      try {
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        setZipUrl(URL.createObjectURL(zipBlob));
+      } catch (err) { alert('ZIP creation failed: ' + err.message); }
+
+      setGenErrors(errors);
+      setGenerating(false);
+    };
+
+    const ready = !!(svgData && rows && rows.length > 0);
+    const pct   = progress.total > 0 ? (progress.current / progress.total) * 100 : 0;
+
+    return (
+      <div className="app">
+        <header className="header">
+          <div className="header-inner">
+            <div className="header-logo">📌</div>
+            <div>
+              <h1>Pinterest Pin Generator</h1>
+              <p className="header-sub">SVG template · Batch rendering · ZIP export</p>
+            </div>
+          </div>
+        </header>
+
+        <main className="main">
+
+          {/* STEP 1 */}
+          <StepCard number={1} title="Upload SVG Template" active={true} done={!!svgData}>
+            <FileUploadZone accept=".svg" label="Choose SVG Template"
+              fileName={svgName} onChange={handleSVGUpload} />
+            {overlayLoading && (
+              <div style={{ marginTop: 10, color: '#6b7280', fontSize: 12 }}>
+                <span className="spinner" />Parsing template…
+              </div>
+            )}
+            {svgData && !overlayLoading && <SVGSummary data={svgData} />}
+          </StepCard>
+
+          {/* STEP 2 */}
+          <StepCard number={2} title="Upload Input Spreadsheet" active={true} done={!!rows}>
+            <FileUploadZone accept=".xlsx,.xls" label="Choose XLSX File"
+              fileName={xlsxName} onChange={handleXLSXUpload} />
+            {xlsxError && <div className="error-msg">{xlsxError}</div>}
+            {rows && (
+              <div className="chips-row">
+                <span className="chip chip-green">✓ {rows.length} valid rows</span>
+                <span className="chip chip-blue">Recipe Name</span>
+                <span className="chip chip-blue">Image1_url</span>
+                <span className="chip chip-blue">Image2_url</span>
+              </div>
+            )}
+          </StepCard>
+
+          {/* STEP 3 */}
+          <StepCard number={3} title="Text Zone Settings" active={ready}>
+            {ready
+              ? <TextZoneSettings settings={settings} svgData={svgData}
+                  onChange={updateSetting} disabled={false} />
+              : <p className="muted">Complete steps 1–2 first.</p>}
+          </StepCard>
+
+          {/* STEP 4 */}
+          <StepCard number={4} title="Live Preview · drag red handles to reposition text zone" active={ready}>
+            {ready ? (
+              <div className="preview-section">
+                {corsWarning && (
+                  <div className="warning-msg">
+                    ⚠ Some images loaded without CORS — preview shown but export may fail for those rows.
+                  </div>
+                )}
+                <div className="preview-outer">
+                  <div className="preview-inner">
+                    <canvas ref={previewCanvasRef} className="preview-canvas" />
+                    <TextZoneOverlay
+                      settings={settings}
+                      canvasH={svgData.canvasH}
+                      canvasW={svgData.canvasW}
+                      onUpdate={updateSetting}
+                    />
+                  </div>
+                </div>
+                <div className="row-nav">
+                  <button className="btn btn-outline"
+                    onClick={() => setCurrentRow(r => Math.max(0, r - 1))}
+                    disabled={currentRow === 0}>‹ Prev</button>
+                  <span className="row-indicator">
+                    <span className="row-name">{rows[currentRow]?.recipeName}</span>
+                    {currentRow + 1} / {rows.length}
+                  </span>
+                  <button className="btn btn-outline"
+                    onClick={() => setCurrentRow(r => Math.min(rows.length - 1, r + 1))}
+                    disabled={currentRow === rows.length - 1}>Next ›</button>
+                </div>
+              </div>
+            ) : <p className="muted">Complete steps 1–2 first.</p>}
+          </StepCard>
+
+          {/* STEP 5 */}
+          <StepCard number={5} title="Generate & Download" active={ready}>
+            {ready ? (
+              <div className="generate-section">
+                <button className="btn btn-primary btn-lg"
+                  onClick={handleGenerate} disabled={generating}>
+                  {generating ? <><span className="spinner" />Rendering {progress.current}/{progress.total}…</> : '⚡ Generate All Pins'}
+                </button>
+
+                {generating && (
+                  <div className="progress-wrap">
+                    <div className="progress-label">Rendering {progress.current} of {progress.total} pins…</div>
+                    <div className="progress-track">
+                      <div className="progress-fill" style={{ width: pct + '%' }} />
+                    </div>
+                  </div>
+                )}
+
+                {zipUrl && !generating && (
+                  <div className="success-banner">
+                    ✓ {rows.length - genErrors.length} pins generated
+                    {genErrors.length > 0 && ` · ${genErrors.length} skipped`}
+                  </div>
+                )}
+                {zipUrl && !generating && (
+                  <a className="btn btn-accent btn-lg" href={zipUrl} download="pinterest_pins.zip">
+                    ⬇ Download pinterest_pins.zip
+                  </a>
+                )}
+                {genErrors.length > 0 && (
+                  <div className="error-list">
+                    <strong>Skipped {genErrors.length} row(s):</strong>
+                    <ul>{genErrors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+                  </div>
+                )}
+              </div>
+            ) : <p className="muted">Complete steps 1–2 first.</p>}
+          </StepCard>
+
+        </main>
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

@@ -229,6 +229,147 @@ function fitTextBlock(ctx, text, options) {
     return best;
 }
 
+function maxLineWidth(ctx, lines) {
+    if (!Array.isArray(lines) || lines.length === 0) return 0;
+    return Math.max(...lines.map((line) => ctx.measureText(String(line || '')).width), 0);
+}
+
+function findMaxFontSizeForLines(ctx, lines, usableW, usableH, fontFamily, fontWeight) {
+    let lo = 6;
+    let hi = 220;
+    let best = 6;
+    while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        ctx.font = `${fontWeight} ${mid}px ${fontFamily}`.trim();
+        const lineH = mid * 1.0;
+        const totalH = lines.length * lineH;
+        const maxW = maxLineWidth(ctx, lines);
+        if (maxW <= usableW && totalH <= usableH) {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return best;
+}
+
+function fitTitleNoOverflow(ctx, text, options) {
+    const {
+        zoneW,
+        zoneH,
+        fontFamily,
+        fontWeight = '900',
+        maxLines = 3,
+        padX = 15,
+        padY = 0,
+        effectMarginX = 0,
+        effectMarginY = 0,
+        uppercase = true,
+    } = options || {};
+
+    const family = normalizeFontFamily(fontFamily);
+    const source = uppercase ? safeUpperCase(text) : String(text || '').trim();
+    const words = source.split(/\s+/).filter(Boolean);
+    const usableW = Math.max(20, Number(zoneW || 0) - (2 * Math.abs(padX)) - (2 * Math.abs(effectMarginX)));
+    const usableH = Math.max(20, Number(zoneH || 0) - (2 * Math.abs(padY)) - (2 * Math.abs(effectMarginY)));
+    const allowedLines = Math.max(1, Number(maxLines || 1));
+
+    const candidates = [];
+    const pushCandidate = (lines) => {
+        if (!Array.isArray(lines) || lines.length === 0) return;
+        if (lines.length > allowedLines) return;
+        candidates.push(lines.map((line) => String(line || '').trim()).filter(Boolean));
+    };
+
+    pushCandidate([source]);
+    if (words.length >= 2 && allowedLines >= 2) {
+        for (let i = 1; i < words.length; i += 1) {
+            pushCandidate([words.slice(0, i).join(' '), words.slice(i).join(' ')]);
+        }
+    }
+    if (words.length >= 4 && allowedLines >= 3) {
+        for (let i = 1; i < words.length - 1; i += 1) {
+            for (let j = i + 1; j < words.length; j += 1) {
+                pushCandidate([
+                    words.slice(0, i).join(' '),
+                    words.slice(i, j).join(' '),
+                    words.slice(j).join(' '),
+                ]);
+            }
+        }
+    }
+
+    if (candidates.length === 0) {
+        candidates.push([source || '']);
+    }
+
+    let best = { lines: candidates[0], fontSize: 6, family, weight: fontWeight };
+    for (const lines of candidates) {
+        const fontSize = findMaxFontSizeForLines(ctx, lines, usableW, usableH, family, fontWeight);
+        if (fontSize > best.fontSize) {
+            best = { lines, fontSize, family, weight: fontWeight };
+            continue;
+        }
+        if (fontSize === best.fontSize) {
+            ctx.font = `${fontWeight} ${fontSize}px ${family}`.trim();
+            const currentWidth = maxLineWidth(ctx, lines);
+            const bestWidth = maxLineWidth(ctx, best.lines);
+            if (currentWidth < bestWidth) {
+                best = { lines, fontSize, family, weight: fontWeight };
+            }
+        }
+    }
+
+    let fontSize = Math.max(6, best.fontSize);
+    let lines = best.lines.slice(0, allowedLines);
+    while (fontSize >= 6) {
+        ctx.font = `${fontWeight} ${fontSize}px ${family}`.trim();
+        lines = lines.map((line) => trimWithEllipsis(ctx, line, usableW));
+        const totalH = lines.length * (fontSize * 1.0);
+        const maxW = maxLineWidth(ctx, lines);
+        if (maxW <= usableW && totalH <= usableH) {
+            break;
+        }
+        fontSize -= 1;
+    }
+
+    ctx.font = `${fontWeight} ${fontSize}px ${family}`.trim();
+    lines = lines.map((line) => trimWithEllipsis(ctx, line, usableW));
+    return { lines, fontSize, family, weight: fontWeight };
+}
+
+function clampTitleScale(value, fallback = 1) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(0.7, Math.min(1.6, parsed));
+}
+
+function applyTitleScaleToFitted(ctx, fitted, usableW, usableH, scale) {
+    const targetScale = clampTitleScale(scale, 1);
+    if (Math.abs(targetScale - 1) < 0.001) return fitted;
+    let nextSize = Math.max(6, Math.round(Number(fitted.fontSize || 12) * targetScale));
+    const family = normalizeFontFamily(fitted.family || 'sans-serif');
+    const weight = String(fitted.weight || '900');
+    const lines = Array.isArray(fitted.lines) ? fitted.lines.slice() : [''];
+    while (nextSize >= 6) {
+        ctx.font = `${weight} ${nextSize}px ${family}`.trim();
+        const maxW = maxLineWidth(ctx, lines);
+        const totalH = lines.length * (nextSize * 1.0);
+        if (maxW <= usableW && totalH <= usableH) {
+            return {
+                ...fitted,
+                lines,
+                fontSize: nextSize,
+                family,
+                weight,
+            };
+        }
+        nextSize -= 1;
+    }
+    return fitted;
+}
+
 function drawStaticText(ctx, textElements) {
     for (const t of textElements || []) {
         if (!t.content) continue;
@@ -312,7 +453,7 @@ function drawFittedTextBlock(ctx, text, rect, style) {
     const height = Number(rect?.height || 0);
     if (width <= 4 || height <= 4) return;
 
-    const fitted = fitTextBlock(ctx, text, {
+    const fitOptions = {
         zoneW: width,
         zoneH: height,
         fontFamily: style.fontFamily,
@@ -324,24 +465,32 @@ function drawFittedTextBlock(ctx, text, rect, style) {
         effectMarginY: Number(style.textEffectOffsetY || 2) + Number(style.textEffectBlur || 0),
         uppercase: Boolean(style.uppercase),
         preferredFontSize: Number(style.preferredFontSize || 0),
-    });
+    };
+    const fitted = style.forceTitleFit
+        ? fitTitleNoOverflow(ctx, text, fitOptions)
+        : fitTextBlock(ctx, text, fitOptions);
+    const usableW = Math.max(20, Number(width || 0) - 30 - (2 * Math.abs(Number(style.textEffectOffsetX || 2))));
+    const usableH = Math.max(20, Number(height || 0) - (2 * Math.abs(Number(style.textEffectOffsetY || 2) + Number(style.textEffectBlur || 0))));
+    const scaledFitted = style.forceTitleFit
+        ? applyTitleScaleToFitted(ctx, fitted, usableW, usableH, style.titleScale)
+        : fitted;
 
     const align = style.textAlign === 'left' ? 'left' : style.textAlign === 'right' ? 'right' : 'center';
-    ctx.font = `${fitted.weight} ${fitted.fontSize}px ${fitted.family}`.trim();
+    ctx.font = `${scaledFitted.weight} ${scaledFitted.fontSize}px ${scaledFitted.family}`.trim();
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = align;
 
-    const lineH = fitted.fontSize * 1.0;
+    const lineH = scaledFitted.fontSize * 1.0;
     const m = ctx.measureText('A');
-    const capAscent = m.actualBoundingBoxAscent || fitted.fontSize * 0.72;
+    const capAscent = m.actualBoundingBoxAscent || scaledFitted.fontSize * 0.72;
     const capDescent = m.actualBoundingBoxDescent || 0;
-    const visualH = capAscent + capDescent + (fitted.lines.length - 1) * lineH;
+    const visualH = capAscent + capDescent + (scaledFitted.lines.length - 1) * lineH;
     const firstBase = y + (height - visualH) / 2 + capAscent;
     const centerX = x + (width / 2);
     const leftX = x + 15;
     const rightX = x + width - 15;
 
-    const positions = fitted.lines.map((line, index) => {
+    const positions = scaledFitted.lines.map((line, index) => {
         const lineY = firstBase + index * lineH;
         if (align === 'left') return { x: leftX, y: lineY };
         if (align === 'right') return { x: rightX, y: lineY };
@@ -352,7 +501,7 @@ function drawFittedTextBlock(ctx, text, rect, style) {
     ctx.beginPath();
     ctx.rect(x, y, width, height);
     ctx.clip();
-    drawTextWithEffect(ctx, fitted.lines, positions, {
+    drawTextWithEffect(ctx, scaledFitted.lines, positions, {
         textAlign: align,
         textColor: style.textColor,
         textEffect: style.textEffect,
@@ -485,13 +634,36 @@ function fontFormatFromPath(fontPath) {
     return 'truetype';
 }
 
+const BUILTIN_FONT_BY_FAMILY = {
+    'bebas neue': 'builtin/BebasNeue-Regular.ttf',
+    'montserrat': 'builtin/Montserrat-Bold.ttf',
+    'oswald': 'builtin/Oswald-Regular.ttf',
+    'poppins': 'builtin/Poppins-Bold.ttf',
+};
+
+function resolveBuiltinFontFile(fontFamily) {
+    const family = normalizeFontFamily(fontFamily || '').toLowerCase();
+    if (!family) return null;
+    return BUILTIN_FONT_BY_FAMILY[family] || null;
+}
+
 function resolveFontPath(fontFile) {
     if (!fontFile) return null;
-    const customPath = path.resolve(
-        path.join(__dirname, '..', '..', 'storage', 'fonts', String(fontFile)),
-    );
-    if (!fs.existsSync(customPath)) return null;
-    return customPath;
+    const storageFonts = path.join(__dirname, '..', '..', 'storage', 'fonts');
+    const raw = String(fontFile).trim();
+    const candidates = [
+        path.resolve(path.join(storageFonts, raw)),
+        path.resolve(path.join(storageFonts, 'builtin', raw)),
+    ];
+    for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+    const builtinByFamily = resolveBuiltinFontFile(raw);
+    if (builtinByFamily) {
+        const builtinPath = path.resolve(path.join(storageFonts, builtinByFamily));
+        if (fs.existsSync(builtinPath)) return builtinPath;
+    }
+    return null;
 }
 
 function stripOuterSvg(svgContent) {
@@ -701,6 +873,16 @@ async function renderPinWithResvg(renderData) {
             `PinTitle_${sanitizeAliasPart(settings.customFontFile)}`,
         )
         : null;
+    let titleBuiltinAlias = null;
+    if (!titleCustomAlias && settings.fontFamily) {
+        const builtinFile = resolveBuiltinFontFile(settings.fontFamily);
+        if (builtinFile) {
+            titleBuiltinAlias = registerFontAlias(
+                builtinFile,
+                `PinBuiltin_${sanitizeAliasPart(settings.fontFamily)}`,
+            );
+        }
+    }
 
     const slotAliasById = new Map();
     secondarySlots.forEach((slot, index) => {
@@ -742,15 +924,16 @@ async function renderPinWithResvg(renderData) {
 
     const titleText = String(content.title || '').trim();
     const titleUsesCustom = Boolean(titleCustomAlias);
-    const titleFamily = titleCustomAlias || settings.fontFamily || '"Poppins", "Segoe UI", Arial, sans-serif';
+    const deferCustomTitleToPillow = Boolean(settings.deferCustomTitleToPillow) && titleUsesCustom;
+    const titleFamily = titleCustomAlias || titleBuiltinAlias || settings.fontFamily || '"Poppins", "Segoe UI", Arial, sans-serif';
     const titleWeight = titleUsesCustom ? '400' : '900';
     const titleAlign = settings.textAlign === 'left' ? 'left' : settings.textAlign === 'right' ? 'right' : 'center';
     const titleClipId = 'clip_title_zone';
     clipPaths.push(`<clipPath id="${titleClipId}"><rect x="${padL}" y="${textZoneY}" width="${textAreaW}" height="${textZoneH}" /></clipPath>`);
     let titleMarkup = '';
 
-    if (titleText) {
-        const fitted = fitTextBlock(ctx, titleText, {
+    if (titleText && !deferCustomTitleToPillow) {
+        const fittedBase = fitTitleNoOverflow(ctx, titleText, {
             zoneW: textAreaW,
             zoneH: textZoneH,
             fontFamily: titleFamily,
@@ -762,6 +945,10 @@ async function renderPinWithResvg(renderData) {
             effectMarginY: safeNumber(settings.textEffectOffsetY, 2) + safeNumber(settings.textEffectBlur, 0),
             uppercase: true,
         });
+        const titleScale = clampTitleScale(settings.titleScale ?? settings.title_scale, 1);
+        const usableW = Math.max(20, textAreaW - 30 - (2 * Math.abs(safeNumber(settings.textEffectOffsetX, 2))));
+        const usableH = Math.max(20, textZoneH - (2 * Math.abs(safeNumber(settings.textEffectOffsetY, 2) + safeNumber(settings.textEffectBlur, 0))));
+        const fitted = applyTitleScaleToFitted(ctx, fittedBase, usableW, usableH, titleScale);
         const lineH = fitted.fontSize * 1.0;
         ctx.font = `${fitted.weight} ${fitted.fontSize}px ${fitted.family}`.trim();
         const metrics = ctx.measureText('A');
@@ -908,10 +1095,6 @@ async function renderPinWithResvg(renderData) {
     }
 
     const overlayInner = stripOuterSvg(template.overlaySvg);
-    const shouldDrawOverlayBeforeImages = Boolean(
-        overlayInner &&
-        overlayHasOccludingImagePlaceholders(template.overlaySvg, zones, width, height),
-    );
     const overlayMarkup = overlayInner ? `<g id="template-overlay">${overlayInner}</g>` : '';
 
     const borderColor = template.textZoneBorderColor;
@@ -938,10 +1121,9 @@ async function renderPinWithResvg(renderData) {
         defsParts.join(''),
         styleBlock,
         `<rect width="${width}" height="${height}" fill="#ffffff" />`,
-        shouldDrawOverlayBeforeImages ? overlayMarkup : '',
         imageEls.join(''),
-        !shouldDrawOverlayBeforeImages ? overlayMarkup : '',
         `<rect x="${padL}" y="${textZoneY}" width="${textAreaW}" height="${textZoneH}" fill="${xmlEscapeAttr(settings.textZoneBgColor || '#ffffff')}" />`,
+        overlayMarkup,
         borderRect,
         titleMarkup,
         secondaryMaskRects.join(''),
@@ -1023,22 +1205,7 @@ async function renderPin(renderData) {
         const zones = Array.isArray(template.zones) ? template.zones : [];
 
         console.error(`[DEBUG] Loaded images:`, availableImages.length);
-        const shouldDrawOverlayBeforeImages = Boolean(
-            template.overlaySvg &&
-            template.overlaySvg.trim() !== '<svg></svg>' &&
-            overlayHasOccludingImagePlaceholders(template.overlaySvg, zones, canvasW, canvasH)
-        );
-
-        // 3. Draw overlay SVG before images when placeholders would cover slots
-        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>' && shouldDrawOverlayBeforeImages) {
-            console.error(`[DEBUG] Drawing overlay SVG`);
-            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
-            if (overlayImg) {
-                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
-            }
-        }
-
-        // 4. Draw images
+        // 3. Draw images
         for (let i = 0; i < zones.length; i++) {
             const z = zones[i];
             if (!z) continue;
@@ -1049,16 +1216,7 @@ async function renderPin(renderData) {
             }
         }
 
-        // 5. Draw overlay SVG after images for normal templates
-        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>' && !shouldDrawOverlayBeforeImages) {
-            console.error(`[DEBUG] Drawing overlay SVG`);
-            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
-            if (overlayImg) {
-                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
-            }
-        }
-
-        // 6. Draw text zone background
+        // 4. Draw text zone background
         console.error(`[DEBUG] Drawing text zone background`);
         const textZoneY = template.textZoneY;
         const textZoneH = template.textZoneHeight;
@@ -1068,6 +1226,15 @@ async function renderPin(renderData) {
 
         ctx.fillStyle = settings.textZoneBgColor || '#ffffff';
         ctx.fillRect(padL, textZoneY, textAreaW, textZoneH);
+
+        // 5. Draw template overlay after text-zone background (matches Playground preview).
+        if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>') {
+            console.error(`[DEBUG] Drawing overlay SVG`);
+            const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
+            if (overlayImg) {
+                ctx.drawImage(overlayImg, 0, 0, canvasW, canvasH);
+            }
+        }
 
         if (template.textZoneBorderColor) {
             const borderWidth = template.textZoneBorderWidth || 4;
@@ -1137,7 +1304,7 @@ async function renderPin(renderData) {
                 }, {
                     fontFamily: titleFontFamily,
                     fontWeight: titleFontWeight,
-                    textAlign: settings.textAlign === 'left' ? 'left' : 'center',
+                    textAlign: settings.textAlign === 'left' ? 'left' : settings.textAlign === 'right' ? 'right' : 'center',
                     textColor: settings.textColor || '#000000',
                     textEffect: settings.textEffect || 'none',
                     textEffectColor: settings.textEffectColor || '#000000',
@@ -1146,6 +1313,8 @@ async function renderPin(renderData) {
                     textEffectBlur: Number(settings.textEffectBlur || 0),
                     maxLines: 3,
                     uppercase: true,
+                    titleScale: clampTitleScale(settings.titleScale ?? settings.title_scale, 1),
+                    forceTitleFit: true,
                 });
             }
 

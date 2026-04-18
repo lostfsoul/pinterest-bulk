@@ -335,6 +335,7 @@ def list_image_pages(
     website_id: int | None = None,
     sitemap_bucket: str | None = None,
     scrape_status: str = "all",
+    enabled_state: str = "all",
     search: str | None = None,
     section: str | None = None,
     db: Session = Depends(get_db),
@@ -388,7 +389,11 @@ def list_image_pages(
         .order_by(Website.name.asc(), Page.created_at.desc())
     )
 
-    query = query.filter(Page.is_enabled == True)
+    enabled_state_normalized = (enabled_state or "all").strip().lower()
+    if enabled_state_normalized == "enabled":
+        query = query.filter(Page.is_enabled == True)
+    elif enabled_state_normalized == "disabled":
+        query = query.filter(Page.is_enabled == False)
 
     if website_id is not None:
         query = query.filter(Page.website_id == website_id)

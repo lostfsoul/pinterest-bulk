@@ -1,18 +1,87 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800;900&family=Bebas+Neue&family=JetBrains+Mono:wght@400;500;600;700;800&family=Montserrat:wght@400;700;900&family=Orbitron:wght@500;700;800&family=Oswald:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --background: 248 250 252;
+    --foreground: 15 23 42;
+    --card: 255 255 255;
+    --card-foreground: 15 23 42;
+    --muted: 241 245 249;
+    --muted-foreground: 100 116 139;
+    --border: 226 232 240;
+    --input: 226 232 240;
+    --primary: 37 99 235;
+    --primary-foreground: 248 250 252;
+    --ring: 59 130 246;
+    --radius: 0.5rem;
+  }
+
   html, body {
-    font-family: 'Poppins', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background-color: #F5F5F0;
+    font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: rgb(var(--background));
+    color: rgb(var(--foreground));
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   * {
     font-family: inherit;
+    border-color: rgb(var(--border));
+  }
+
+  input, select, textarea {
+    @apply rounded-md border border-slate-300 bg-white;
+  }
+
+  h1 {
+    @apply text-2xl font-semibold tracking-tight text-slate-900;
+  }
+
+  h2 {
+    @apply text-xl font-semibold tracking-tight text-slate-900;
+  }
+
+  h3 {
+    @apply text-lg font-semibold text-slate-900;
+  }
+}
+
+@layer utilities {
+  .app-surface {
+    @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+  }
+
+  .app-muted {
+    @apply bg-slate-50 text-slate-500;
+  }
+
+  .app-section {
+    @apply app-surface p-4 md:p-5;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Compatibility overrides for legacy brutal-style classes */
+  .border-black {
+    border-color: rgb(226 232 240) !important;
+  }
+
+  .border-2 {
+    border-width: 1px !important;
+  }
+
+  .font-black {
+    font-weight: 600 !important;
+    letter-spacing: -0.01em;
+  }
+
+  .uppercase {
+    text-transform: none;
   }
 }

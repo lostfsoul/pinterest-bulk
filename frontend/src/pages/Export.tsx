@@ -1,12 +1,20 @@
 import { useEffect, useState } from 'react';
+import { AlertTriangle, Download, Trash2 } from 'lucide-react';
 import apiClient, { PinDraft } from '../services/api';
-import { Button } from '../components/Button';
+import { Button } from '../components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
+import { Badge } from '../components/ui/badge';
 
 export default function Export() {
   const [pins, setPins] = useState<PinDraft[]>([]);
   const [selectedPins, setSelectedPins] = useState<Set<number>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [activeWebsiteId, setActiveWebsiteId] = useState<number | null>(() => {
+    const stored = localStorage.getItem('active_website_id');
+    return stored ? Number(stored) : null;
+  });
   const [exportHistory, setExportHistory] = useState<Array<{
     id: number;
     pins_count: number;
@@ -15,24 +23,36 @@ export default function Export() {
   }>>([]);
 
   useEffect(() => {
-    loadPins();
-    loadHistory();
+    void loadPins();
+    void loadHistory();
   }, []);
+
+  useEffect(() => {
+    const onWebsiteSwitch = (event: Event) => {
+      const custom = event as CustomEvent<number>;
+      setActiveWebsiteId(custom.detail ?? null);
+    };
+    window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
+    return () => window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
+  }, []);
+
+  useEffect(() => {
+    void loadPins();
+  }, [activeWebsiteId]);
 
   const loadPins = async () => {
     try {
-      const response = await apiClient.listPins({ is_selected: true });
+      const response = await apiClient.listPins({ is_selected: true, website_id: activeWebsiteId ?? undefined });
       setPins(response.data);
-      // Select only rendered pins by default
-      const renderedPins = response.data.filter(p => p.media_url && p.media_url.startsWith('/static/'));
-      setSelectedPins(new Set(renderedPins.map(p => p.id)));
+      const renderedPins = response.data.filter((p) => p.media_url && p.media_url.startsWith('/static/'));
+      setSelectedPins(new Set(renderedPins.map((p) => p.id)));
     } catch (error) {
       console.error('Failed to load pins:', error);
     }
   };
 
-  const renderedPins = pins.filter(p => p.media_url && p.media_url.startsWith('/static/'));
-  const unrenderedPins = pins.filter(p => !p.media_url || !p.media_url.startsWith('/static/'));
+  const renderedPins = pins.filter((p) => p.media_url && p.media_url.startsWith('/static/'));
+  const unrenderedPins = pins.filter((p) => !p.media_url || !p.media_url.startsWith('/static/'));
 
   const loadHistory = async () => {
     try {
@@ -55,9 +75,8 @@ export default function Export() {
 
   const handleExport = async (selectedOnly: boolean) => {
     const pinIds = selectedOnly ? Array.from(selectedPins) : renderedPins.map((pin) => pin.id);
-    const pinsToExport = pinIds.length;
 
-    if (pinsToExport === 0) {
+    if (pinIds.length === 0) {
       alert('No pins selected for export');
       return;
     }
@@ -68,15 +87,12 @@ export default function Export() {
       const response = await apiClient.exportCsv({
         selected_only: selectedOnly,
         pin_ids: pinIds,
+        website_id: activeWebsiteId ?? undefined,
       });
       const { download_url } = response.data;
-
-      // Trigger download
       window.open(download_url, '_blank');
-
-      // Refresh data
-      loadPins();
-      loadHistory();
+      await loadPins();
+      await loadHistory();
     } catch (error) {
       console.error('Failed to export:', error);
       const message =
@@ -142,199 +158,178 @@ export default function Export() {
     if (allSelected) {
       setSelectedPins(new Set());
     } else {
-      setSelectedPins(new Set(pins.map(p => p.id)));
+      setSelectedPins(new Set(pins.map((p) => p.id)));
     }
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-black uppercase text-black font-mono">Export</h1>
-        <p className="text-gray-600 mt-1 font-bold font-mono">Review and export pins to CSV for Pinterest</p>
-      </div>
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Export</CardTitle>
+          <CardDescription>Review rendered pins and export a Pinterest-ready CSV.</CardDescription>
+        </CardHeader>
+      </Card>
 
-      {/* Export actions */}
-      <div className="bg-white border-2 border-black shadow-brutal p-4 sm:p-6">
-        {unrenderedPins.length > 0 && (
-          <div className="mb-4 p-3 bg-yellow-100 border-2 border-black rounded-md">
-            <div className="flex items-start gap-2">
-              <svg className="w-5 h-5 text-yellow-700 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-              </svg>
-              <div className="flex-1">
-                <p className="text-sm font-bold text-yellow-800">
-                  {unrenderedPins.length} pin{unrenderedPins.length !== 1 ? 's' : ''} not rendered yet
-                </p>
-                <p className="text-xs text-yellow-700 mt-1">
-                  Unrendered pins won't be included in the export. Go to Generate page to render them first.
-                </p>
+      <Card>
+        <CardContent className="space-y-4 pt-6">
+          {unrenderedPins.length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-amber-800">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4" />
+                <div>
+                  <p className="text-sm font-medium">
+                    {unrenderedPins.length} pin{unrenderedPins.length !== 1 ? 's are' : ' is'} not rendered yet.
+                  </p>
+                  <p className="text-xs">Unrendered pins are excluded from CSV export.</p>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <div>
-            <p className="text-sm font-bold text-black">
-              {selectedPins.size} of {renderedPins.length} rendered pins selected
-              {unrenderedPins.length > 0 && (
-                <span className="text-gray-500"> ({unrenderedPins.length} unrendered)</span>
-              )}
-            </p>
-            <p className="text-xs text-gray-500 mt-1">
-              CSV includes: Title, Media URL, Board, Description, Link, Publish Date, Keywords
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              onClick={() => handleExport(true)}
-              disabled={selectedPins.size === 0 || exporting || deleting}
-            >
-              {exporting ? 'Exporting...' : `Export Selected (${selectedPins.size})`}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => handleExport(false)}
-              disabled={renderedPins.length === 0 || exporting || deleting}
-            >
-              Export All ({renderedPins.length})
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleDeleteSelected}
-              disabled={selectedPins.size === 0 || exporting || deleting}
-            >
-              {deleting ? 'Deleting...' : `Delete Selected (${selectedPins.size})`}
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={handleDeleteAllListed}
-              disabled={pins.length === 0 || exporting || deleting}
-            >
-              {deleting ? 'Deleting...' : `Delete All Listed (${pins.length})`}
-            </Button>
-          </div>
-        </div>
-      </div>
+          )}
 
-      {/* Pins table */}
-      <div className="bg-white border-2 border-black shadow-brutal overflow-hidden">
-        <div className="px-4 sm:px-6 py-4 border-b-2 border-black bg-bg-secondary flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
-          <h2 className="font-black uppercase text-sm sm:text-base">Pins Ready for Export</h2>
-          <label className="flex items-center gap-2 text-sm font-bold">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <p className="text-sm text-slate-700">
+                <span className="font-semibold">{selectedPins.size}</span> of{' '}
+                <span className="font-semibold">{renderedPins.length}</span> rendered pins selected.
+              </p>
+              <p className="text-xs text-slate-500">
+                CSV fields: title, media URL, board, description, link, publish date, keywords.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => void handleExport(true)} disabled={selectedPins.size === 0 || exporting || deleting}>
+                <Download className="h-4 w-4" />
+                {exporting ? 'Exporting...' : `Export Selected (${selectedPins.size})`}
+              </Button>
+              <Button variant="secondary" onClick={() => void handleExport(false)} disabled={renderedPins.length === 0 || exporting || deleting}>
+                Export All ({renderedPins.length})
+              </Button>
+              <Button variant="outline" onClick={() => void handleDeleteSelected()} disabled={selectedPins.size === 0 || exporting || deleting}>
+                <Trash2 className="h-4 w-4" />
+                Delete Selected
+              </Button>
+              <Button variant="outline" onClick={() => void handleDeleteAllListed()} disabled={pins.length === 0 || exporting || deleting}>
+                Delete All Listed
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-base">Pins Ready for Export</CardTitle>
+          <label className="flex items-center gap-2 text-sm text-slate-600">
             <input
               type="checkbox"
               checked={allSelected}
               onChange={toggleAll}
-              className="h-4 w-4 accent-accent"
+              className="h-4 w-4"
             />
-            Select All
+            Select all
           </label>
-        </div>
-
-        {pins.length === 0 ? (
-          <div className="p-8 sm:p-12 text-center text-gray-500 font-mono">
-            No pins to export. Generate pins first.
-          </div>
-        ) : (
-          <div className="overflow-x-auto max-h-[400px] sm:max-h-[500px] overflow-y-auto">
-            <table className="w-full min-w-[600px]">
-              <thead className="bg-bg-secondary sticky top-0">
-                <tr>
-                  <th className="px-4 py-3 text-left">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={toggleAll}
-                      className="h-4 w-4 accent-accent"
-                    />
-                  </th>
-                  <th className="px-4 py-3 text-left text-xs font-black uppercase">Title</th>
-                  <th className="px-4 py-3 text-left text-xs font-black uppercase hidden sm:table-cell">Board</th>
-                  <th className="px-4 py-3 text-left text-xs font-black uppercase">Image</th>
-                  <th className="px-4 py-3 text-left text-xs font-black uppercase hidden md:table-cell">Publish Date</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-black">
-                {pins.map((pin) => {
-                  const isRendered = pin.media_url && pin.media_url.startsWith('/static/');
-                  return (
-                    <tr
-                      key={pin.id}
-                      className={`hover:bg-bg-secondary ${!selectedPins.has(pin.id) ? 'opacity-50' : ''} ${!isRendered ? 'bg-gray-50' : ''}`}
-                    >
-                      <td className="px-4 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedPins.has(pin.id)}
-                          onChange={() => togglePinSelection(pin.id)}
-                          disabled={!isRendered}
-                          className="h-4 w-4 accent-accent disabled:opacity-50 disabled:cursor-not-allowed"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-sm font-bold text-black truncate max-w-[120px] sm:max-w-xs">
-                          {pin.title || 'Untitled'}
-                        </p>
-                        <p className="text-xs text-gray-500 truncate max-w-[120px] sm:max-w-xs sm:hidden">{pin.link}</p>
-                      </td>
-                      <td className="px-4 py-3 text-sm font-medium hidden sm:table-cell">{pin.board_name || '-'}</td>
-                      <td className="px-4 py-3">
-                        {isRendered ? (
-                          <img
-                            src={pin.media_url ?? undefined}
-                            alt=""
-                            className="w-10 h-10 sm:w-12 sm:h-12 object-cover border-2 border-black"
-                            onError={(e) => {
-                              (e.target as HTMLImageElement).style.display = 'none';
-                            }}
+        </CardHeader>
+        <CardContent>
+          {pins.length === 0 ? (
+            <div className="rounded-md border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">
+              No pins to export. Generate pins first.
+            </div>
+          ) : (
+            <div className="max-h-[560px] overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-12">
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        className="h-4 w-4"
+                      />
+                    </TableHead>
+                    <TableHead>Title</TableHead>
+                    <TableHead className="hidden sm:table-cell">Board</TableHead>
+                    <TableHead>Image</TableHead>
+                    <TableHead className="hidden md:table-cell">Publish Date</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pins.map((pin) => {
+                    const isRendered = pin.media_url && pin.media_url.startsWith('/static/');
+                    return (
+                      <TableRow key={pin.id} className={`${!selectedPins.has(pin.id) ? 'opacity-60' : ''}`}>
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={selectedPins.has(pin.id)}
+                            onChange={() => togglePinSelection(pin.id)}
+                            disabled={!isRendered}
+                            className="h-4 w-4 disabled:cursor-not-allowed"
                           />
-                        ) : (
-                          <div className="flex items-center gap-1">
-                            <span className="text-xs text-gray-400">Not rendered</span>
-                            <span className="px-1.5 py-0.5 text-xs bg-gray-100 text-gray-500 border border-black rounded">{pin.status}</span>
-                          </div>
-                        )}
-                      </td>
-                      <td className="px-4 py-3 text-sm font-medium hidden md:table-cell">
-                        {pin.publish_date
-                          ? new Date(pin.publish_date).toLocaleString()
-                          : 'Not scheduled'}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+                        </TableCell>
+                        <TableCell>
+                          <p className="max-w-xs truncate text-sm font-medium text-slate-900">{pin.title || 'Untitled'}</p>
+                          {!isRendered && <Badge variant="outline" className="mt-1">Not rendered</Badge>}
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell">{pin.board_name || '-'}</TableCell>
+                        <TableCell>
+                          {isRendered ? (
+                            <img
+                              src={pin.media_url ?? undefined}
+                              alt=""
+                              className="h-12 w-12 rounded border border-slate-200 object-cover"
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).style.display = 'none';
+                              }}
+                            />
+                          ) : (
+                            <span className="text-xs text-slate-500">{pin.status}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell">
+                          {pin.publish_date
+                            ? new Date(pin.publish_date).toLocaleString()
+                            : 'Not scheduled'}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Export history */}
-      {exportHistory.length > 0 && (
-        <div className="bg-white border-2 border-black shadow-brutal overflow-hidden">
-          <div className="px-4 sm:px-6 py-4 border-b-2 border-black bg-bg-secondary">
-            <h2 className="font-black uppercase text-sm sm:text-base">Export History</h2>
-          </div>
-          <div className="divide-y divide-black">
-            {exportHistory.map((export_item) => (
-              <div key={export_item.id} className="px-4 sm:px-6 py-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 hover:bg-bg-secondary">
-                <div>
-                  <p className="text-sm font-bold text-black">{export_item.filename}</p>
-                  <p className="text-xs text-gray-500">
-                    {export_item.pins_count} pins • {new Date(export_item.created_at).toLocaleString()}
-                  </p>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Export History</CardTitle>
+          <CardDescription>Recent CSV files generated from this workspace.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {exportHistory.length === 0 ? (
+            <p className="text-sm text-slate-500">No export history yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {exportHistory.map((item) => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 px-3 py-2">
+                  <div className="text-sm text-slate-700">
+                    <div className="font-medium text-slate-900">{item.filename}</div>
+                    <div className="text-xs text-slate-500">
+                      {item.pins_count} pins • {new Date(item.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => downloadFromHistory(item.filename)}>
+                    <Download className="h-4 w-4" />
+                    Download
+                  </Button>
                 </div>
-                <button
-                  onClick={() => downloadFromHistory(export_item.filename)}
-                  className="text-sm font-bold uppercase hover:opacity-80"
-                >
-                  Download
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
