@@ -71,6 +71,17 @@ class PageUpdate(BaseModel):
     title: str | None = None
 
 
+class PageBulkUpdateRequest(BaseModel):
+    """Schema for updating multiple pages in a single request."""
+    page_ids: list[int] = Field(default_factory=list)
+    is_enabled: bool
+
+
+class PageBulkUpdateResponse(BaseModel):
+    """Schema for bulk page update response."""
+    updated_count: int
+
+
 # =============================================================================
 # Keyword Schemas
 # =============================================================================

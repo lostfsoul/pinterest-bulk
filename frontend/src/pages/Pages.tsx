@@ -127,9 +127,7 @@ export default function Pages() {
     if (pageIds.length === 0) return;
     setSaving(true);
     try {
-      await Promise.all(
-        pageIds.map((id) => apiClient.updatePage(id, { is_enabled: enabled })),
-      );
+      await apiClient.updatePagesBulk({ page_ids: pageIds, is_enabled: enabled });
       const targetSet = new Set(pageIds);
       setPages((prev) => prev.map((item) => (targetSet.has(item.id) ? { ...item, is_enabled: enabled } : item)));
     } catch (error) {

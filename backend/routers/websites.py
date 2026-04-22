@@ -16,6 +16,8 @@ from schemas import (
     WebsiteWithStats,
     PageResponse,
     PageUpdate,
+    PageBulkUpdateRequest,
+    PageBulkUpdateResponse,
     SitemapGroupResponse,
     SitemapGroupsResponse,
     SitemapImportRequest,
@@ -513,6 +515,22 @@ def delete_trend_keyword(
 def list_all_pages(db: Session = Depends(get_db)):
     """List all pages across all websites."""
     return db.query(Page).order_by(Page.created_at.desc()).all()
+
+
+@router.patch("/pages/bulk", response_model=PageBulkUpdateResponse)
+def update_pages_bulk(payload: PageBulkUpdateRequest, db: Session = Depends(get_db)):
+    """Update multiple pages in one DB roundtrip."""
+    page_ids = sorted({int(page_id) for page_id in payload.page_ids if int(page_id) > 0})
+    if not page_ids:
+        return PageBulkUpdateResponse(updated_count=0)
+
+    updated_count = (
+        db.query(Page)
+        .filter(Page.id.in_(page_ids))
+        .update({Page.is_enabled: payload.is_enabled}, synchronize_session=False)
+    )
+    db.commit()
+    return PageBulkUpdateResponse(updated_count=updated_count)
 
 
 @router.patch("/pages/{page_id}", response_model=PageResponse)

@@ -33,6 +33,10 @@ export interface Page {
   created_at: string;
 }
 
+export interface PageBulkUpdateResponse {
+  updated_count: number;
+}
+
 export interface Template {
   id: number;
   name: string;
@@ -463,6 +467,8 @@ export const apiClient = {
   listAllPages: () => api.get<Page[]>('/websites/pages/all'),
   updatePage: (id: number, data: { is_enabled?: boolean; title?: string }) =>
     api.patch<Page>(`/websites/pages/${id}`, data),
+  updatePagesBulk: (data: { page_ids: number[]; is_enabled: boolean }) =>
+    api.patch<PageBulkUpdateResponse>('/websites/pages/bulk', data),
 
   // Keywords
   uploadKeywords: (file: File) => {
