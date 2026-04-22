@@ -4,6 +4,7 @@ Pin draft generation and management router.
 import asyncio
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, List, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
@@ -36,9 +37,12 @@ from schemas import (
 )
 from routers.images import scrape_page_into_db
 from services.palette import normalize_hex_color, resolve_palette_settings
+from services.template_parser import parse_svg_template
 from services.trend_ranking import rank_pages_for_trends
 
 router = APIRouter()
+
+_TEMPLATE_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "templates"
 
 
 # =============================================================================
@@ -653,15 +657,52 @@ def run_generation_job(job_id: int) -> None:
         db.close()
 
 
+def _load_template_svg_defaults(template: Template) -> dict:
+    """Read parser-detected text-zone defaults directly from template SVG."""
+    try:
+        svg_path = _TEMPLATE_STORAGE_ROOT / str(template.filename or "")
+        if not svg_path.exists():
+            return {}
+        svg_text = svg_path.read_text(encoding="utf-8")
+        parsed = parse_svg_template(svg_text) or {}
+    except Exception:
+        return {}
+
+    defaults: dict[str, int] = {}
+    try:
+        if parsed.get("text_zone_y") is not None:
+            defaults["text_zone_y"] = int(parsed.get("text_zone_y"))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed.get("text_zone_height") is not None:
+            defaults["text_zone_height"] = int(parsed.get("text_zone_height"))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed.get("text_zone_x") is not None:
+            defaults["text_zone_pad_left"] = max(0, int(parsed.get("text_zone_x")))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed.get("text_zone_x") is not None and parsed.get("text_zone_width") is not None:
+            right = int(template.width) - (int(parsed.get("text_zone_x")) + int(parsed.get("text_zone_width")))
+            defaults["text_zone_pad_right"] = max(0, right)
+    except (TypeError, ValueError):
+        pass
+    return defaults
+
+
 def build_render_settings(template: Template, request_settings: Optional[PinRenderSettings]) -> dict:
     """Build render settings from template defaults and request overrides."""
     text_zone = next((zone for zone in template.zones if zone.zone_type == "text"), None)
     text_zone_props = text_zone.props if text_zone and text_zone.props else {}
+    svg_defaults = _load_template_svg_defaults(template)
     settings = {
-        "text_zone_y": text_zone.y if text_zone else int(round(template.height * 0.44)),
-        "text_zone_height": text_zone.height if text_zone else int(round(template.height * 0.12)),
-        "text_zone_pad_left": max(0, text_zone.x) if text_zone else 0,
-        "text_zone_pad_right": max(0, template.width - (text_zone.x + text_zone.width)) if text_zone else 0,
+        "text_zone_y": svg_defaults.get("text_zone_y", text_zone.y if text_zone else int(round(template.height * 0.44))),
+        "text_zone_height": svg_defaults.get("text_zone_height", text_zone.height if text_zone else int(round(template.height * 0.12))),
+        "text_zone_pad_left": svg_defaults.get("text_zone_pad_left", max(0, text_zone.x) if text_zone else 0),
+        "text_zone_pad_right": svg_defaults.get("text_zone_pad_right", max(0, template.width - (text_zone.x + text_zone.width)) if text_zone else 0),
         "text_align": text_zone_props.get("text_align") or "left",
         "palette_mode": text_zone_props.get("palette_mode"),
         "text_zone_bg_color": text_zone_props.get("text_zone_bg_color") or "#ffffff",
@@ -748,6 +789,7 @@ def fill_missing_settings_from_template(pin: PinDraft, db: Session, settings: di
         return settings
     text_zone = next((zone for zone in template.zones if zone.zone_type == "text"), None)
     props = text_zone.props if text_zone and text_zone.props else {}
+    svg_defaults = _load_template_svg_defaults(template)
     if not settings.get("text_align"):
         settings["text_align"] = props.get("text_align") or "left"
     if not settings.get("font_family"):
@@ -774,14 +816,17 @@ def fill_missing_settings_from_template(pin: PinDraft, db: Session, settings: di
         settings["title_padding_x"] = int(props.get("title_padding_x", 15) or 15)
     if settings.get("line_height_multiplier") is None:
         settings["line_height_multiplier"] = float(props.get("line_height_multiplier", 1) or 1)
-    if settings.get("text_zone_y") is None and text_zone:
-        settings["text_zone_y"] = text_zone.y
-    if settings.get("text_zone_height") is None and text_zone:
-        settings["text_zone_height"] = text_zone.height
+    if settings.get("text_zone_y") is None:
+        settings["text_zone_y"] = svg_defaults.get("text_zone_y", text_zone.y if text_zone else int(round(template.height * 0.44)))
+    if settings.get("text_zone_height") is None:
+        settings["text_zone_height"] = svg_defaults.get("text_zone_height", text_zone.height if text_zone else int(round(template.height * 0.12)))
     if settings.get("text_zone_pad_left") is None:
-        settings["text_zone_pad_left"] = max(0, text_zone.x) if text_zone else 0
+        settings["text_zone_pad_left"] = svg_defaults.get("text_zone_pad_left", max(0, text_zone.x) if text_zone else 0)
     if settings.get("text_zone_pad_right") is None:
-        settings["text_zone_pad_right"] = max(0, template.width - (text_zone.x + text_zone.width)) if text_zone else 0
+        settings["text_zone_pad_right"] = svg_defaults.get(
+            "text_zone_pad_right",
+            max(0, template.width - (text_zone.x + text_zone.width)) if text_zone else 0,
+        )
     return settings
 
 

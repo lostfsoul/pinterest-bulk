@@ -119,21 +119,9 @@ async def render_pin_to_file(
     import base64
     from io import BytesIO
 
-    # Prefer persisted template zones from DB (same source used by preview UI),
-    # then fall back to parser zones.
-    db_image_zones = [
-        {
-            "x": int(zone.x),
-            "y": int(zone.y),
-            "width": int(zone.width),
-            "height": int(zone.height),
-        }
-        for zone in sorted(
-            [z for z in (template.zones or []) if z.zone_type == "image"],
-            key=lambda z: (int((z.props or {}).get("zone_index", 9999)), z.id or 0),
-        )
-    ]
-    zones = db_image_zones if db_image_zones else list(template_data.get("zones") or [])
+    # Always trust fresh parser-detected zones from SVG for rendering.
+    # This keeps server generation aligned with live preview behavior.
+    zones = list(template_data.get("zones") or [])
     image_slot_count = max(1, len(zones))
     text_zone = next((z for z in (template.zones or []) if z.zone_type == "text"), None)
     text_zone_props = dict(text_zone.props or {}) if text_zone and isinstance(text_zone.props, dict) else {}
@@ -270,6 +258,34 @@ async def render_pin_to_file(
             'customFontFile': settings.get('custom_font_file', settings.get('customFontFile')),
             'secondaryTextValues': settings.get('secondary_text_values', settings.get('secondaryTextValues', dict(secondary_text_defaults))),
         }
+
+    # Force text zone geometry to parser-detected SVG values so stale DB zone
+    # metadata cannot place title in the wrong band.
+    parsed_text_zone_y = template_data.get('text_zone_y')
+    parsed_text_zone_h = template_data.get('text_zone_height')
+    parsed_text_zone_x = template_data.get('text_zone_x')
+    parsed_text_zone_w = template_data.get('text_zone_width')
+    try:
+        if parsed_text_zone_y is not None:
+            settings['text_zone_y'] = int(parsed_text_zone_y)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed_text_zone_h is not None:
+            settings['text_zone_height'] = int(parsed_text_zone_h)
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed_text_zone_x is not None:
+            settings['textZonePadLeft'] = max(0, int(parsed_text_zone_x))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if parsed_text_zone_x is not None and parsed_text_zone_w is not None:
+            right = int(template.width) - (int(parsed_text_zone_x) + int(parsed_text_zone_w))
+            settings['textZonePadRight'] = max(0, right)
+    except (TypeError, ValueError):
+        pass
 
     # Prepare render data
     if not zones:
