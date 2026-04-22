@@ -133,6 +133,36 @@ def _build_ai_preview_content(
     }
 
 
+def _resolve_template_title_mode(
+    *,
+    title_base: str,
+    ai_settings: dict[str, Any],
+    fallback_title: str,
+) -> str:
+    mode = _clean_text(ai_settings.get("templateTitleMode") or ai_settings.get("template_title_mode")).lower() or "prompt"
+    if mode == "original":
+        return _truncate(title_base, 100)
+
+    prompt_template = _clean_text(
+        ai_settings.get("templateTitlePrompt")
+        or ai_settings.get("template_title_prompt")
+    )
+    if mode == "prompt" and prompt_template:
+        prompt_seed = prompt_template.replace("{{title}}", title_base)
+        prompt = (
+            "Return one Pinterest title only (plain text, no quotes), max 100 chars.\n"
+            f"Instruction: {prompt_seed}\n"
+            f"Base title: {title_base}\n"
+        )
+        raw = call_model(prompt, model=DEFAULT_OPENAI_MODEL, temperature=0.4, max_tokens=120)
+        value = _clean_text(raw)
+        if value:
+            first_line = value.splitlines()[0]
+            return _truncate(first_line, 100)
+
+    return _truncate(fallback_title or title_base, 100)
+
+
 def _extract_json_object(raw: str) -> dict[str, Any] | None:
     text = str(raw or "").strip()
     if not text:
@@ -205,13 +235,20 @@ def generate_ai_preview_content(
     raw = call_model(prompt, model=DEFAULT_OPENAI_MODEL, temperature=0.4, max_tokens=350)
     parsed = _extract_json_object(raw or "")
     if not parsed:
-        return fallback
+        parsed_payload = fallback
+    else:
+        parsed_payload = {
+            "title": _truncate(str(parsed.get("title") or fallback["title"]), 100),
+            "description": _truncate(str(parsed.get("description") or fallback["description"]), 500),
+            "alt_text": _truncate(str(parsed.get("alt_text") or fallback["alt_text"]), 180),
+        }
 
-    return {
-        "title": _truncate(str(parsed.get("title") or fallback["title"]), 100),
-        "description": _truncate(str(parsed.get("description") or fallback["description"]), 500),
-        "alt_text": _truncate(str(parsed.get("alt_text") or fallback["alt_text"]), 180),
-    }
+    parsed_payload["title"] = _resolve_template_title_mode(
+        title_base=title_base,
+        ai_settings=ai_settings,
+        fallback_title=parsed_payload.get("title") or fallback.get("title") or title_base,
+    )
+    return parsed_payload
 
 
 def _normalize_url(raw_url: str) -> str:
@@ -394,11 +431,15 @@ def _default_playground_settings() -> dict[str, Any]:
         "font_set": "font_combo_1",
         "font_color": "#1a1a1a",
         "title_scale": 1.0,
+        "title_padding_x": 15,
+        "line_height_multiplier": 1.0,
         "ai_settings": {
             "promptStyle": "informative",
             "customPrompt": "",
             "language": "English",
             "promptEnabled": True,
+            "templateTitleMode": "original",
+            "templateTitlePrompt": "Rewrite this Pinterest title based on {{title}} while keeping intent and clarity.",
         },
         "image_settings": {
             "fetchFromPage": True,
@@ -500,7 +541,15 @@ def list_font_sets(db: Session) -> list[dict[str, str]]:
     for font_id, main, secondary, accent, font_file in preset_candidates:
         if not (_FONT_STORAGE_ROOT / font_file).exists():
             continue
-        presets.append({"id": font_id, "main": main, "secondary": secondary, "accent": accent})
+        presets.append(
+            {
+                "id": font_id,
+                "main": main,
+                "secondary": secondary,
+                "accent": accent,
+                "font_file": font_file,
+            }
+        )
     custom_fonts = (
         db.query(CustomFont)
         .order_by(CustomFont.created_at.desc())
@@ -513,6 +562,7 @@ def list_font_sets(db: Session) -> list[dict[str, str]]:
                 "main": font.family,
                 "secondary": "Inter",
                 "accent": font.family,
+                "font_file": font.filename,
             }
         )
     return presets
@@ -548,6 +598,14 @@ def save_settings(db: Session, website_id: int, payload: dict[str, Any]) -> dict
         merged_payload["title_scale"] = max(0.7, min(1.6, float(merged_payload.get("title_scale", 1.0))))
     except (TypeError, ValueError):
         merged_payload["title_scale"] = 1.0
+    try:
+        merged_payload["title_padding_x"] = max(8, min(36, int(float(merged_payload.get("title_padding_x", 15)))))
+    except (TypeError, ValueError):
+        merged_payload["title_padding_x"] = 15
+    try:
+        merged_payload["line_height_multiplier"] = max(0.8, min(1.35, float(merged_payload.get("line_height_multiplier", 1.0))))
+    except (TypeError, ValueError):
+        merged_payload["line_height_multiplier"] = 1.0
     for key in ("ai_settings", "image_settings", "display_settings", "advanced_settings"):
         base = merged_payload.get(key)
         incoming = payload.get(key)
@@ -602,6 +660,11 @@ def build_preview_metadata(
         title_base=title_base,
         page_url=page.url,
         ai_settings=ai_settings,
+    )
+    ai_preview["title"] = _resolve_template_title_mode(
+        title_base=title_base,
+        ai_settings=ai_settings,
+        fallback_title=ai_preview.get("title") or title_base,
     )
 
     return {

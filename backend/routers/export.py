@@ -359,20 +359,8 @@ def export_csv(
     if not request.pin_ids:
         pins = _dedupe_by_page_latest(pins)
 
-    # Ensure media exists for export candidates; rerender with template defaults when needed.
-    for pin in pins:
-        if _media_file_is_current(pin):
-            continue
-        settings = _resolve_render_settings(pin, db)
-        try:
-            url = asyncio.run(generate_pin_media_url(pin, db, settings))
-            if not url:
-                pin.media_url = None
-        except Exception:
-            pin.media_url = None
-    db.commit()
-
-    # Filter out pins that are still not rendered/available.
+    # Strict mode: never render during export.
+    # Only include pins that already have a rendered media file on disk.
     rendered_pins = [pin for pin in pins if _media_file_exists(pin.media_url)]
 
     if not rendered_pins:

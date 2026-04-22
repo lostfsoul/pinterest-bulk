@@ -56,6 +56,24 @@ class PinRegenerateRequest(BaseModel):
     settings: Optional[PinRenderSettings] = None
 
 
+class PinRegeneratePreviewRequest(BaseModel):
+    """Request for building a candidate replacement for a single pin."""
+    template_id: int | None = None
+    selected_image_url: str | None = None
+    regenerate_ai_content: bool = True
+    ai_settings: dict | None = None
+
+
+class PinRegenerateApplyRequest(BaseModel):
+    """Request for applying a candidate replacement to a pin."""
+    template_id: int | None = None
+    selected_image_url: str | None = None
+    title: str | None = None
+    description: str | None = None
+    board_name: str | None = None
+    render_settings: Optional[PinRenderSettings] = None
+
+
 class PinDeleteRequest(BaseModel):
     """Request for deleting pin drafts."""
     pin_ids: list[int] | None = None
@@ -358,6 +376,16 @@ def _generate_pin_drafts(
             cta_style=request.cta_style,
             title_max=request.title_max,
         )
+        pin_titles = _resolve_title_mode_variants(
+            page=page,
+            keywords=keywords,
+            image_count=title_count,
+            ai_settings=_playground_ai_settings_from_website_settings(site_settings),
+            language=page_language,
+            website_name=website_name,
+            fallback_titles=pin_titles,
+            title_max=request.title_max,
+        )
         pin_description = generate_description_ai(
             page,
             keywords,
@@ -651,6 +679,8 @@ def build_render_settings(template: Template, request_settings: Optional[PinRend
         "text_effect_offset_y": int(text_zone_props.get("text_effect_offset_y", 2) or 2),
         "text_effect_blur": int(text_zone_props.get("text_effect_blur", 0) or 0),
         "title_scale": float(text_zone_props.get("title_scale", 1) or 1),
+        "title_padding_x": int(text_zone_props.get("title_padding_x", 15) or 15),
+        "line_height_multiplier": float(text_zone_props.get("line_height_multiplier", 1) or 1),
         "custom_font_file": text_zone_props.get("custom_font_file"),
     }
     if request_settings:
@@ -695,6 +725,8 @@ def merge_pin_settings(pin: PinDraft, request_settings: Optional[PinRenderSettin
         "text_effect_offset_y": pin.text_effect_offset_y,
         "text_effect_blur": pin.text_effect_blur,
         "title_scale": None,
+        "title_padding_x": None,
+        "line_height_multiplier": None,
         "brand_palette_background_color": request_settings.brand_palette_background_color if request_settings else None,
         "brand_palette_text_color": request_settings.brand_palette_text_color if request_settings else None,
         "brand_palette_effect_color": request_settings.brand_palette_effect_color if request_settings else None,
@@ -738,6 +770,10 @@ def fill_missing_settings_from_template(pin: PinDraft, db: Session, settings: di
         settings["text_effect_blur"] = int(props.get("text_effect_blur", 0) or 0)
     if settings.get("title_scale") is None:
         settings["title_scale"] = float(props.get("title_scale", 1) or 1)
+    if settings.get("title_padding_x") is None:
+        settings["title_padding_x"] = int(props.get("title_padding_x", 15) or 15)
+    if settings.get("line_height_multiplier") is None:
+        settings["line_height_multiplier"] = float(props.get("line_height_multiplier", 1) or 1)
     if settings.get("text_zone_y") is None and text_zone:
         settings["text_zone_y"] = text_zone.y
     if settings.get("text_zone_height") is None and text_zone:
@@ -767,6 +803,14 @@ def resolve_page_render_settings(
         resolved["title_scale"] = max(0.7, min(1.6, float(resolved.get("title_scale", 1) or 1)))
     except (TypeError, ValueError):
         resolved["title_scale"] = 1.0
+    try:
+        resolved["title_padding_x"] = max(8, min(36, int(float(resolved.get("title_padding_x", 15) or 15))))
+    except (TypeError, ValueError):
+        resolved["title_padding_x"] = 15
+    try:
+        resolved["line_height_multiplier"] = max(0.8, min(1.35, float(resolved.get("line_height_multiplier", 1) or 1)))
+    except (TypeError, ValueError):
+        resolved["line_height_multiplier"] = 1.0
     return resolved
 
 
@@ -856,6 +900,77 @@ def select_keywords_for_generation(page_keywords: list[str]) -> list[str]:
         seen.add(key)
         keywords.append(keyword)
     return keywords
+
+
+def _playground_ai_settings_from_website_settings(site_settings: dict | None) -> dict:
+    if not isinstance(site_settings, dict):
+        return {}
+    playground = site_settings.get("playground")
+    if not isinstance(playground, dict):
+        return {}
+    ai_settings = playground.get("ai_settings")
+    if isinstance(ai_settings, dict):
+        return ai_settings
+    return {}
+
+
+def _resolve_title_mode_variants(
+    *,
+    page: Page,
+    keywords: list[str],
+    image_count: int,
+    ai_settings: dict | None,
+    language: str,
+    website_name: str,
+    fallback_titles: list[str],
+    title_max: int,
+) -> list[str]:
+    settings = ai_settings if isinstance(ai_settings, dict) else {}
+    mode = str(
+        settings.get("templateTitleMode")
+        or settings.get("template_title_mode")
+        or "prompt"
+    ).strip().lower()
+    page_title = sanitize_generated_text(page.title or "") or sanitize_generated_text(page.url or "") or "Untitled"
+
+    if mode == "original":
+        return [clip_text(page_title, title_max) for _ in range(max(1, image_count))]
+
+    prompt_template = str(
+        settings.get("templateTitlePrompt")
+        or settings.get("template_title_prompt")
+        or ""
+    ).strip()
+    if mode == "prompt" and prompt_template:
+        from services.ai_generation import DEFAULT_OPENAI_MODEL, generate_title_variants
+
+        generated = generate_title_variants(
+            page_title=page.title,
+            keywords=keywords,
+            count=max(1, image_count),
+            preset={
+                "prompt_template": prompt_template,
+                "model": DEFAULT_OPENAI_MODEL,
+                "temperature": 0.4,
+                "max_tokens": 220,
+                "language": language,
+                "tone": "seo-friendly",
+                "cta_style": "soft",
+                "max_chars": title_max,
+                "target_field": "title",
+            },
+            website_name=website_name,
+            url=page.url,
+            section=page.section or "",
+        )
+        if generated:
+            clipped = [clip_text(item, title_max) for item in generated if str(item or "").strip()]
+            if clipped:
+                while len(clipped) < max(1, image_count):
+                    clipped.append(clipped[len(clipped) % len(clipped)])
+                return clipped[: max(1, image_count)]
+
+    return fallback_titles
 
 
 def generate_pin_titles(
@@ -1463,6 +1578,15 @@ def update_pin(
     if not pin:
         raise HTTPException(status_code=404, detail="Pin draft not found")
 
+    if update.template_id is not None:
+        if update.template_id <= 0:
+            raise HTTPException(status_code=400, detail="template_id must be positive")
+        template_exists = db.query(Template.id).filter(Template.id == update.template_id).first()
+        if not template_exists:
+            raise HTTPException(status_code=404, detail="Template not found")
+        pin.template_id = update.template_id
+    if update.selected_image_url is not None:
+        pin.selected_image_url = update.selected_image_url
     if update.title is not None:
         pin.title = sanitize_generated_text(update.title)
     if update.description is not None:
@@ -1641,3 +1765,112 @@ def regenerate_pins(
         "pin_count": len(pins),
         "template_id": request.template_id,
     }
+
+
+@router.post("/{pin_id}/regenerate-preview")
+def regenerate_pin_preview(
+    pin_id: int,
+    request: PinRegeneratePreviewRequest,
+    db: Session = Depends(get_db),
+):
+    """Build a candidate replacement for a single pin without persisting changes."""
+    pin = db.query(PinDraft).filter(PinDraft.id == pin_id).first()
+    if not pin:
+        raise HTTPException(status_code=404, detail="Pin draft not found")
+    page = db.query(Page).filter(Page.id == pin.page_id).first()
+    if not page:
+        raise HTTPException(status_code=404, detail="Page not found for this pin")
+    website = db.query(Website).filter(Website.id == page.website_id).first()
+    if not website:
+        raise HTTPException(status_code=404, detail="Website not found")
+
+    candidate_template_id = request.template_id or pin.template_id
+    if not candidate_template_id:
+        raise HTTPException(status_code=400, detail="No template available for this pin")
+    template = db.query(Template).filter(Template.id == candidate_template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    images = (
+        db.query(PageImage)
+        .filter(PageImage.page_id == pin.page_id, PageImage.is_excluded == False)  # noqa: E712
+        .order_by(PageImage.category.asc(), PageImage.created_at.desc())
+        .all()
+    )
+    available_urls = [img.url for img in images]
+    selected_image_url = request.selected_image_url or pin.selected_image_url or (available_urls[0] if available_urls else None)
+
+    title = pin.title or (page.title or "")
+    description = pin.description or ""
+    board_name = pin.board_name or "General"
+    if request.regenerate_ai_content:
+        try:
+            from services.playground_service import generate_ai_preview_content
+
+            generated = generate_ai_preview_content(
+                db=db,
+                website_id=website.id,
+                page_url=page.url,
+                ai_settings_override=request.ai_settings if isinstance(request.ai_settings, dict) else None,
+            )
+            title = generated.get("title") or title
+            description = generated.get("description") or description
+        except Exception:
+            pass
+
+    return {
+        "pin_id": pin.id,
+        "template_id": template.id,
+        "template_name": template.name,
+        "template_path": template.filename,
+        "selected_image_url": selected_image_url,
+        "available_images": available_urls,
+        "candidate": {
+            "title": sanitize_generated_text(title),
+            "description": sanitize_generated_text(description),
+            "board_name": sanitize_generated_text(board_name),
+        },
+    }
+
+
+@router.post("/{pin_id}/regenerate-apply", response_model=PinDraftResponse)
+def regenerate_pin_apply(
+    pin_id: int,
+    request: PinRegenerateApplyRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Apply a candidate replacement to a single pin and re-render it."""
+    pin = db.query(PinDraft).filter(PinDraft.id == pin_id).first()
+    if not pin:
+        raise HTTPException(status_code=404, detail="Pin draft not found")
+
+    if request.template_id is not None:
+        if request.template_id <= 0:
+            raise HTTPException(status_code=400, detail="template_id must be positive")
+        template = db.query(Template).filter(Template.id == request.template_id).first()
+        if not template:
+            raise HTTPException(status_code=404, detail="Template not found")
+        pin.template_id = request.template_id
+    if request.selected_image_url is not None:
+        pin.selected_image_url = request.selected_image_url
+    if request.title is not None:
+        pin.title = sanitize_generated_text(request.title)
+    if request.description is not None:
+        pin.description = sanitize_generated_text(request.description)
+    if request.board_name is not None:
+        pin.board_name = sanitize_generated_text(request.board_name)
+
+    settings = merge_pin_settings(pin, request.render_settings)
+    settings = fill_missing_settings_from_template(pin, db, settings)
+    settings = resolve_page_render_settings(pin.page, settings, pin.selected_image_url)
+    persist_render_settings(pin, settings)
+
+    pin.media_url = None
+    pin.status = "draft"
+    pin.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(pin)
+
+    background_tasks.add_task(render_pin_background, pin.id)
+    return pin

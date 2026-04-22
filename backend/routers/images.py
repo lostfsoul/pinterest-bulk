@@ -3,6 +3,7 @@ Image scraping and management router.
 """
 import os
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import List
 from datetime import datetime
@@ -26,7 +27,11 @@ from schemas import (
     GlobalExcludedImageCreate,
     GlobalExcludedImageApplyResponse,
 )
-from services.image_metadata import fetch_image_metadata, is_hq_image
+from services.image_metadata import (
+    fetch_image_metadata,
+    is_hq_image,
+    IMAGE_METADATA_TIMEOUT_SECONDS,
+)
 from services.image_classifier import classify_image, should_auto_exclude, ImageCategory
 from services.global_exclusion import check_global_exclusion, apply_exclusion_to_images, recompute_global_exclusions
 
@@ -36,6 +41,31 @@ router = APIRouter()
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; PinterestCSVTool/1.0; +https://github.com/pinterest-csv-tool)"
 }
+
+
+def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+def _env_float(name: str, default: float, min_value: float, max_value: float) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+# Tunable scraping limits. Safe defaults for low-end VPS.
+SCRAPE_PAGE_TIMEOUT_SECONDS = _env_float("SCRAPE_PAGE_TIMEOUT_SECONDS", 20.0, 5.0, 120.0)
+SCRAPE_PAGE_RETRIES = _env_int("SCRAPE_PAGE_RETRIES", 1, 0, 5)
+METADATA_CONCURRENCY_PER_PAGE = _env_int("SCRAPE_METADATA_CONCURRENCY_PER_PAGE", 4, 1, 20)
+SCRAPE_PAGES_CONCURRENCY = _env_int("SCRAPE_PAGES_CONCURRENCY", 3, 1, 20)
 
 
 @dataclass
@@ -171,9 +201,25 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=HEADERS) as client:
-            response = await client.get(page_url)
-            response.raise_for_status()
+        async with httpx.AsyncClient(
+            timeout=SCRAPE_PAGE_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            headers=HEADERS,
+        ) as client:
+            response = None
+            for attempt in range(SCRAPE_PAGE_RETRIES + 1):
+                try:
+                    response = await client.get(page_url)
+                    response.raise_for_status()
+                    break
+                except Exception:
+                    if attempt >= SCRAPE_PAGE_RETRIES:
+                        raise
+                    await asyncio.sleep(0.2 * (attempt + 1))
+
+            if response is None:
+                return image_results
+
             html = response.text
 
             # Extract only the main article content (exclude related posts, navigation, etc.)
@@ -226,16 +272,35 @@ async def scrape_page_into_db(
     page: Page,
     db: Session,
     global_rules: list[GlobalExcludedImage] | None = None,
+    pre_scrape_results: list[ImageScrapeResult] | None = None,
 ) -> list[PageImage]:
     """Scrape a page and persist its images with classification metadata."""
     db.query(PageImage).filter(PageImage.page_id == page.id).delete()
 
     rules = global_rules if global_rules is not None else db.query(GlobalExcludedImage).all()
-    scrape_results = await scrape_page_images(page.url)
+    scrape_results = pre_scrape_results if pre_scrape_results is not None else await scrape_page_images(page.url)
 
     images: list[PageImage] = []
-    for result in scrape_results:
-        metadata = await fetch_image_metadata(result.url)
+    semaphore = asyncio.Semaphore(METADATA_CONCURRENCY_PER_PAGE)
+
+    async def fetch_with_limit(result: ImageScrapeResult):
+        async with semaphore:
+            return result, await fetch_image_metadata(result.url, client=metadata_client)
+
+    async with httpx.AsyncClient(
+        timeout=IMAGE_METADATA_TIMEOUT_SECONDS,
+        follow_redirects=True,
+        headers=HEADERS,
+    ) as metadata_client:
+        metadata_results = await asyncio.gather(
+            *(fetch_with_limit(result) for result in scrape_results),
+            return_exceptions=True,
+        )
+
+    for metadata_result in metadata_results:
+        if isinstance(metadata_result, Exception):
+            continue
+        result, metadata = metadata_result
 
         if metadata.width is None and result.html_width:
             metadata.width = result.html_width
@@ -476,9 +541,32 @@ async def scrape_pages_batch(
 
     errors = []
     scraped = 0
+
+    semaphore = asyncio.Semaphore(SCRAPE_PAGES_CONCURRENCY)
+
+    async def scrape_for_page(page: Page):
+        async with semaphore:
+            return page.id, await scrape_page_images(page.url)
+
+    pre_scraped_results = await asyncio.gather(
+        *(scrape_for_page(page) for page in pages),
+        return_exceptions=True,
+    )
+    results_by_page_id: dict[int, list[ImageScrapeResult]] = {}
+    for result in pre_scraped_results:
+        if isinstance(result, Exception):
+            continue
+        page_id, scrape_results = result
+        results_by_page_id[page_id] = scrape_results
+
     for page in pages:
         try:
-            await scrape_page_into_db(page, db, global_rules)
+            await scrape_page_into_db(
+                page,
+                db,
+                global_rules,
+                pre_scrape_results=results_by_page_id.get(page.id),
+            )
             scraped += 1
         except Exception as error:
             db.rollback()

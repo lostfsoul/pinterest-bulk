@@ -182,6 +182,9 @@ export interface PinRenderSettings {
   text_effect_offset_x?: number;
   text_effect_offset_y?: number;
   text_effect_blur?: number;
+  title_scale?: number;
+  title_padding_x?: number;
+  line_height_multiplier?: number;
   custom_font_file?: string | null;
 }
 
@@ -226,6 +229,7 @@ export interface WorkflowStatusResponse {
   scheduled_count: number;
   scheduled_until: string | null;
   auto_regen_enabled: boolean;
+  auto_regen_days_before_deadline: number;
   desired_gap_days: number;
   has_active_job: boolean;
   active_job_id: number | null;
@@ -316,6 +320,25 @@ export interface TrendKeywordEntry {
   updated_at: string;
 }
 
+export interface TrendKeywordMatchPage {
+  page_id: number;
+  url: string;
+  title: string;
+  score: number;
+}
+
+export interface TrendKeywordMatchItem {
+  keyword: string;
+  weight: number;
+  matched_count: number;
+  matched_pages: TrendKeywordMatchPage[];
+}
+
+export interface TrendKeywordMatchPreviewResponse {
+  website_id: number;
+  items: TrendKeywordMatchItem[];
+}
+
 export interface AIModelInfo {
   id: string;
   provider: string;
@@ -369,6 +392,7 @@ export interface PlaygroundFontSet {
   main: string;
   secondary: string;
   accent: string;
+  font_file?: string;
 }
 
 export interface PlaygroundSettings {
@@ -377,6 +401,8 @@ export interface PlaygroundSettings {
   font_set: string;
   font_color: string;
   title_scale?: number;
+  title_padding_x?: number;
+  line_height_multiplier?: number;
   ai_settings?: Record<string, unknown>;
   image_settings?: Record<string, unknown>;
   display_settings?: Record<string, unknown>;
@@ -471,6 +497,8 @@ export const apiClient = {
     api.delete('/keywords/entries', { params: { url } }),
   listTrendKeywords: (websiteId: number) =>
     api.get<TrendKeywordEntry[]>(`/websites/${websiteId}/trend-keywords`),
+  getTrendKeywordMatchPreview: (params: { website_id: number; pages_per_keyword?: number; min_score?: number }) =>
+    api.get<TrendKeywordMatchPreviewResponse>('/keywords/trend/match-preview', { params }),
 
   // Templates
   listTemplates: () => api.get<Template[]>('/templates'),
@@ -649,6 +677,8 @@ export const apiClient = {
   getPin: (id: number) => api.get<PinDraft>(`/pins/${id}`),
   getPinDetail: (id: number) => api.get<PinDetail>(`/pins/${id}/detail`),
   updatePin: (id: number, data: {
+    template_id?: number;
+    selected_image_url?: string;
     title?: string;
     description?: string;
     board_name?: string;
@@ -659,6 +689,12 @@ export const apiClient = {
     text_zone_pad_right?: number;
     font_family?: string;
     text_color?: string;
+    custom_font_file?: string | null;
+    text_effect?: 'none' | 'drop' | 'echo' | 'outline';
+    text_effect_color?: string;
+    text_effect_offset_x?: number;
+    text_effect_offset_y?: number;
+    text_effect_blur?: number;
     status?: string;
     is_selected?: boolean;
   }) => api.patch<PinDraft>(`/pins/${id}`, data),
@@ -673,6 +709,34 @@ export const apiClient = {
     api.post<PinDraft>(`/pins/${id}/render`, data),
   regeneratePins: (data: { template_id: number; settings?: PinRenderSettings }) =>
     api.post<{ message: string; pin_count: number; template_id: number }>('/pins/regenerate', data),
+  regeneratePinPreview: (id: number, data?: {
+    template_id?: number | null;
+    selected_image_url?: string | null;
+    regenerate_ai_content?: boolean;
+    ai_settings?: Record<string, unknown>;
+  }) =>
+    api.post<{
+      pin_id: number;
+      template_id: number;
+      template_name: string;
+      template_path: string;
+      selected_image_url: string | null;
+      available_images: string[];
+      candidate: {
+        title: string;
+        description: string;
+        board_name: string;
+      };
+    }>(`/pins/${id}/regenerate-preview`, data || {}),
+  regeneratePinApply: (id: number, data: {
+    template_id?: number | null;
+    selected_image_url?: string | null;
+    title?: string | null;
+    description?: string | null;
+    board_name?: string | null;
+    render_settings?: PinRenderSettings;
+  }) =>
+    api.post<PinDraft>(`/pins/${id}/regenerate-apply`, data),
 
   // Schedule
   getScheduleSettings: () => api.get<ScheduleSettings>('/schedule'),

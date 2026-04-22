@@ -12,6 +12,7 @@ type WorkflowForm = {
   daily_pin_count: number;
   scheduling_window_days: number;
   auto_regeneration_enabled: boolean;
+  auto_regeneration_days_before_deadline: number;
   timezone: string;
   start_hour: number;
   end_hour: number;
@@ -33,6 +34,7 @@ const DEFAULT_FORM: WorkflowForm = {
   daily_pin_count: 5,
   scheduling_window_days: 33,
   auto_regeneration_enabled: false,
+  auto_regeneration_days_before_deadline: 3,
   timezone: 'UTC',
   start_hour: 13,
   end_hour: 21,
@@ -190,6 +192,10 @@ export default function WorkflowSettingsPanel() {
           daily_pin_count: toNumber(generation.daily_pin_count, workflowRes.data.pins_per_day ?? DEFAULT_FORM.daily_pin_count),
           scheduling_window_days: toNumber(generation.scheduling_window_days, workflowRes.data.window_days ?? DEFAULT_FORM.scheduling_window_days),
           auto_regeneration_enabled: Boolean(generation.auto_regeneration_enabled ?? workflowRes.data.auto_regen_enabled ?? DEFAULT_FORM.auto_regeneration_enabled),
+          auto_regeneration_days_before_deadline: toNumber(
+            generation.auto_regeneration_days_before_deadline,
+            workflowRes.data.auto_regen_days_before_deadline ?? DEFAULT_FORM.auto_regeneration_days_before_deadline,
+          ),
           timezone: String(generation.timezone ?? scheduleSettings?.timezone ?? DEFAULT_FORM.timezone),
           start_hour: toNumber(generation.start_hour, scheduleSettings?.start_hour ?? DEFAULT_FORM.start_hour),
           end_hour: toNumber(generation.end_hour, scheduleSettings?.end_hour ?? DEFAULT_FORM.end_hour),
@@ -337,6 +343,7 @@ export default function WorkflowSettingsPanel() {
           daily_pin_count: clamp(form.daily_pin_count, 1, 100),
           scheduling_window_days: clamp(form.scheduling_window_days, 2, 60),
           auto_regeneration_enabled: form.auto_regeneration_enabled,
+          auto_regeneration_days_before_deadline: clamp(form.auto_regeneration_days_before_deadline, 0, 60),
           timezone: form.timezone.trim() || 'UTC',
           start_hour: clamp(form.start_hour, 0, 23),
           end_hour: clamp(form.end_hour, 0, 23),
@@ -461,19 +468,6 @@ export default function WorkflowSettingsPanel() {
         </Button>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
-        <p className="text-base font-medium">
-          Pins are currently generated until: <strong>{formatDateLabel(workflowStatus?.scheduled_until || null)}</strong>
-        </p>
-        <Button
-          className="w-full"
-          onClick={() => void generateNextBatch()}
-          disabled={running || !activeWebsiteId || Boolean(workflowStatus?.has_active_job)}
-        >
-          {running ? 'Starting...' : workflowStatus?.has_active_job ? 'Generation already running' : 'Generate next batch earlier'}
-        </Button>
-      </div>
-
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-4">
         <h3 className="text-lg font-semibold">Scheduling</h3>
 
@@ -512,6 +506,22 @@ export default function WorkflowSettingsPanel() {
             onChange={(event) => setForm((prev) => ({ ...prev, auto_regeneration_enabled: event.target.checked }))}
           />
           Enable automatic pin regeneration (background scheduler)
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs font-semibold uppercase text-gray-500">
+            Regenerate when days ahead &lt;=
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={60}
+            value={form.auto_regeneration_days_before_deadline}
+            onChange={(event) => setForm((prev) => ({
+              ...prev,
+              auto_regeneration_days_before_deadline: clamp(Number(event.target.value) || 0, 0, 60),
+            }))}
+            className="h-10 w-full rounded-md border border-gray-300 bg-white px-3 md:w-56"
+          />
         </label>
       </div>
 
@@ -755,6 +765,19 @@ export default function WorkflowSettingsPanel() {
       {previewLoading && <div className="text-xs text-gray-500">Loading schedule preview…</div>}
       {previewError && <div className="text-xs text-red-600">{previewError}</div>}
       {status && <div className="text-xs border border-gray-200 rounded-md px-3 py-2 bg-gray-50">{status}</div>}
+
+      <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
+        <p className="text-sm text-slate-600">
+          Pins are currently generated until: <strong className="text-slate-900">{formatDateLabel(workflowStatus?.scheduled_until || null)}</strong>
+        </p>
+        <Button
+          className="w-full bg-emerald-600 text-white hover:bg-emerald-700"
+          onClick={() => void generateNextBatch()}
+          disabled={running || !activeWebsiteId || Boolean(workflowStatus?.has_active_job)}
+        >
+          {running ? 'Starting Generation...' : workflowStatus?.has_active_job ? 'Generation In Progress' : 'Generate Pins Now'}
+        </Button>
+      </div>
     </div>
   );
 }

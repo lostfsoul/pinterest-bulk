@@ -243,6 +243,8 @@ async def render_pin_to_file(
             'textEffectOffsetX': 2,
             'textEffectOffsetY': 2,
             'textEffectBlur': 0,
+            'titlePaddingX': 15,
+            'lineHeightMultiplier': 1.0,
             'customFontFile': None,
             'secondaryTextValues': dict(secondary_text_defaults),
         }
@@ -262,6 +264,8 @@ async def render_pin_to_file(
             'textEffectOffsetY': settings.get('text_effect_offset_y', settings.get('textEffectOffsetY', 2)),
             'textEffectBlur': settings.get('text_effect_blur', settings.get('textEffectBlur', 0)),
             'titleScale': settings.get('title_scale', settings.get('titleScale', 1)),
+            'titlePaddingX': settings.get('title_padding_x', settings.get('titlePaddingX', 15)),
+            'lineHeightMultiplier': settings.get('line_height_multiplier', settings.get('lineHeightMultiplier', 1)),
             'deferCustomTitleToPillow': bool(settings.get('custom_font_file', settings.get('customFontFile'))),
             'customFontFile': settings.get('custom_font_file', settings.get('customFontFile')),
             'secondaryTextValues': settings.get('secondary_text_values', settings.get('secondaryTextValues', dict(secondary_text_defaults))),
@@ -455,11 +459,7 @@ async def _render_with_python(render_data: Dict[str, Any]) -> bool:
         pad_left = settings.get('textZonePadLeft', 0)
         pad_right = settings.get('textZonePadRight', 0)
 
-        # White background for text zone
-        draw.rectangle(
-            [pad_left, text_zone_y, width - pad_right, text_zone_y + text_zone_h],
-            fill=settings.get('textZoneBgColor', '#ffffff'),
-        )
+        # Keep template background as uploaded; only render title text.
 
         # Draw title
         title = content.get('title', '')
@@ -524,6 +524,7 @@ def _fit_text_lines_with_pillow(
     effect_margin_y: int = 0,
     preferred_font_size: int | None = None,
     split_layout: bool = False,
+    line_height_multiplier: float = 1.0,
 ) -> tuple[list[str], Any, int]:
     from PIL import ImageFont
 
@@ -619,7 +620,7 @@ def _fit_text_lines_with_pillow(
         while low <= high:
             size = (low + high) // 2
             font = load_font(size)
-            line_height = max(1, int(round(size * 1.0)))
+            line_height = max(1, int(round(size * line_height_multiplier)))
             total_height = line_height * len(lines)
             max_line_w = max_width(lines, font)
             fits = len(lines) <= max_lines and max_line_w <= usable_width and total_height <= usable_height
@@ -631,57 +632,34 @@ def _fit_text_lines_with_pillow(
                 high = size - 1
         return best_size_local, best_font_local
 
-    if split_layout and max_lines >= 3 and normalized:
-        words = [part for part in normalized.split(" ") if part]
-        candidates: list[list[str]] = []
-        if words:
-            candidates.append([normalized])
-            if len(words) >= 2:
-                for i in range(1, len(words)):
-                    candidates.append([
-                        " ".join(words[:i]).strip(),
-                        " ".join(words[i:]).strip(),
-                    ])
-            if len(words) >= 4:
-                for i in range(1, len(words) - 1):
-                    for j in range(i + 1, len(words)):
-                        candidates.append([
-                            " ".join(words[:i]).strip(),
-                            " ".join(words[i:j]).strip(),
-                            " ".join(words[j:]).strip(),
-                        ])
-        if not candidates:
-            candidates = [[normalized]]
-
-        best_lines = candidates[0]
-        best_size = 6
-        best_font = load_font(best_size)
-        best_width = 10**9
-        for lines_candidate in candidates:
-            lines_candidate = [line for line in lines_candidate if line]
-            if not lines_candidate or len(lines_candidate) > max_lines:
-                continue
-            size_candidate, font_candidate = find_max_font_for_lines(lines_candidate)
-            width_candidate = max_width(lines_candidate, font_candidate)
-            if size_candidate > best_size or (size_candidate == best_size and width_candidate < best_width):
-                best_size = size_candidate
-                best_font = font_candidate
-                best_lines = lines_candidate
-                best_width = width_candidate
-
-        # Final hard clamp with ellipsis safety.
-        while best_size >= 6:
-            best_font = load_font(best_size)
-            clamped_lines = [fit_line_with_ellipsis(line, best_font) for line in best_lines[:max_lines]]
-            max_line_w = max_width(clamped_lines, best_font)
-            total_h = max(1, int(round(best_size * 1.0))) * len(clamped_lines)
-            if max_line_w <= usable_width and total_h <= usable_height:
-                return clamped_lines, best_font, best_size
-            best_size -= 1
-
-        fallback_font = load_font(6)
-        fallback_lines = [fit_line_with_ellipsis(line, fallback_font) for line in best_lines[:max_lines]]
-        return fallback_lines, fallback_font, 6
+    if split_layout and normalized:
+        low = 8
+        if preferred_font_size is not None and int(preferred_font_size) > 0:
+            high = max(8, min(220, int(preferred_font_size)))
+        else:
+            high = 220
+        best_lines = [normalized]
+        best_font = load_font(12)
+        best_size = 12
+        while low <= high:
+            size = (low + high) // 2
+            font = load_font(size)
+            lines = wrap_words(normalized, font)
+            lines = lines[:max_lines]
+            if len(lines) > max_lines:
+                lines = lines[:max_lines]
+            total_h = max(1, int(round(size * line_height_multiplier))) * len(lines)
+            max_line_w = max_width(lines, font)
+            fits = len(lines) <= max_lines and max_line_w <= usable_width and total_h <= usable_height
+            if fits:
+                best_size = size
+                best_font = font
+                best_lines = lines
+                low = size + 1
+            else:
+                high = size - 1
+        best_lines = [fit_line_with_ellipsis(line, best_font) for line in best_lines[:max_lines]]
+        return best_lines, best_font, best_size
 
     best_lines = [normalized] if normalized else [""]
     best_font = load_font(12)
@@ -700,7 +678,7 @@ def _fit_text_lines_with_pillow(
         for line in lines:
             bbox = draw.textbbox((0, 0), line or "A", font=font)
             heights.append(max(1, bbox[3] - bbox[1]))
-        line_height = max(heights or [size])
+        line_height = max(1, int(round(size * line_height_multiplier)))
         total_height = line_height * len(lines)
         max_width = max((line_width(line, font) for line in lines), default=0)
         fits = len(lines) <= max_lines and max_width <= usable_width and total_height <= usable_height
@@ -823,6 +801,8 @@ def _draw_fitted_text_block_with_pillow(
     preferred_font_size: int | None = None,
     title_scale: float | None = None,
     force_title_layout: bool = False,
+    title_padding_x: int = 15,
+    line_height_multiplier: float = 1.0,
 ) -> None:
     x, y, width, height = rect
     if width <= 4 or height <= 4:
@@ -840,12 +820,13 @@ def _draw_fitted_text_block_with_pillow(
         fallback_font_path,
         max_lines=max_lines,
         uppercase=uppercase,
-        pad_x=15,
+        pad_x=title_padding_x,
         pad_y=0,
         effect_margin_x=text_effect_offset_x,
         effect_margin_y=text_effect_offset_y + text_effect_blur,
         preferred_font_size=preferred_font_size,
         split_layout=force_title_layout,
+        line_height_multiplier=line_height_multiplier,
     )
 
     if title_scale is not None:
@@ -864,22 +845,23 @@ def _draw_fitted_text_block_with_pillow(
                 fallback_font_path,
                 max_lines=max_lines,
                 uppercase=uppercase,
-                pad_x=15,
+                pad_x=title_padding_x,
                 pad_y=0,
                 effect_margin_x=text_effect_offset_x,
                 effect_margin_y=text_effect_offset_y + text_effect_blur,
                 preferred_font_size=target_size,
                 split_layout=force_title_layout,
+                line_height_multiplier=line_height_multiplier,
             )
 
     metrics = draw.textbbox((0, 0), "Ag", font=font)
     cap_height = (metrics[3] - metrics[1]) or font_size
-    line_height = max(1, int(round(font_size * 1.0)))
+    line_height = max(1, int(round(font_size * line_height_multiplier)))
     visual_height = cap_height + (len(lines) - 1) * line_height
     first_y = y + (height - visual_height) / 2
     center_x = x + (width / 2)
-    left_x = x + 15
-    right_x = x + width - 15
+    left_x = x + title_padding_x
+    right_x = x + width - title_padding_x
     positions: list[tuple[float, float]] = []
 
     align = str(text_align or "center").strip().lower()
@@ -948,6 +930,8 @@ def _apply_custom_font_overlay(
     text_effect_offset_y = int(settings.get("textEffectOffsetY", 2) or 2)
     text_effect_blur = int(settings.get("textEffectBlur", 0) or 0)
     title_scale = settings.get("titleScale", settings.get("title_scale", 1))
+    title_padding_x = int(settings.get("titlePaddingX", settings.get("title_padding_x", 15)) or 15)
+    line_height_multiplier = float(settings.get("lineHeightMultiplier", settings.get("line_height_multiplier", 1)) or 1)
     title = content.get("title", "")
 
     # Keep original template background/border untouched; only redraw text with custom font.
@@ -974,6 +958,8 @@ def _apply_custom_font_overlay(
             uppercase=True,
             title_scale=title_scale,
             force_title_layout=True,
+            title_padding_x=title_padding_x,
+            line_height_multiplier=line_height_multiplier,
         )
 
     secondary_defaults = template.get("secondaryTextDefaults") or {}
@@ -1029,6 +1015,7 @@ def _apply_custom_font_overlay(
             max_lines=int(raw_slot.get("max_lines", 2) or 2),
             uppercase=bool(raw_slot.get("uppercase", False)),
             preferred_font_size=int(raw_slot.get("font_size", 0) or 0),
+            line_height_multiplier=float(raw_slot.get("line_height_multiplier", 1) or 1),
         )
 
     img.save(output_path, "PNG")
@@ -1166,3 +1153,6 @@ async def regenerate_all_pins(
         'success': success_count,
         'errors': errors,
     }
+    line_height_multiplier = max(0.8, min(1.4, float(line_height_multiplier or 1.0)))
+    title_padding_x = max(8, min(36, int(title_padding_x or 15)))
+    line_height_multiplier = max(0.8, min(1.4, float(line_height_multiplier or 1.0)))

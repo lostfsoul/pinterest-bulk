@@ -583,11 +583,27 @@ async def upload_font(
     return {"filename": safe_name, "family": pretty_family}
 
 
-@router.get("/fonts/{filename}")
+@router.get("/fonts/{filename:path}")
 def get_font_file(filename: str):
     """Serve an uploaded font file by filename."""
-    safe_name = Path(filename).name
-    font_path = FONT_DIR / safe_name
+    candidate = Path(filename)
+    if candidate.is_absolute():
+        raise HTTPException(status_code=400, detail="Invalid font path")
+
+    normalized = Path(str(candidate).replace("\\", "/"))
+    font_path = (FONT_DIR / normalized).resolve()
+    font_root = FONT_DIR.resolve()
+    if font_root not in font_path.parents and font_path != font_root:
+        raise HTTPException(status_code=400, detail="Invalid font path")
+    if not font_path.exists() or not font_path.is_file():
+        # Backward compatibility: allow requesting just filename for builtin fonts.
+        fallback = (FONT_DIR / "builtin" / Path(normalized.name)).resolve()
+        if font_root not in fallback.parents and fallback != font_root:
+            raise HTTPException(status_code=400, detail="Invalid font path")
+        if not fallback.exists() or not fallback.is_file():
+            raise HTTPException(status_code=404, detail="Font not found")
+        font_path = fallback
+
     if not font_path.exists():
         raise HTTPException(status_code=404, detail="Font not found")
     return FileResponse(font_path)

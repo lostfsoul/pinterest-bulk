@@ -107,8 +107,28 @@ def _resolve_playground_render_settings(db: Session, website: Website) -> dict[s
             title_scale = max(0.7, min(1.6, float(title_scale_raw)))
     except (TypeError, ValueError):
         title_scale = None
+    title_padding_x_raw = playground.get("title_padding_x")
+    title_padding_x: int | None = None
+    try:
+        if title_padding_x_raw is not None:
+            title_padding_x = max(8, min(36, int(float(title_padding_x_raw))))
+    except (TypeError, ValueError):
+        title_padding_x = None
+    line_height_raw = playground.get("line_height_multiplier")
+    line_height_multiplier: float | None = None
+    try:
+        if line_height_raw is not None:
+            line_height_multiplier = max(0.8, min(1.35, float(line_height_raw)))
+    except (TypeError, ValueError):
+        line_height_multiplier = None
 
-    if not font_set and not font_color and title_scale is None:
+    if (
+        not font_set
+        and not font_color
+        and title_scale is None
+        and title_padding_x is None
+        and line_height_multiplier is None
+    ):
         return {}
 
     render: dict[str, Any] = {}
@@ -116,6 +136,10 @@ def _resolve_playground_render_settings(db: Session, website: Website) -> dict[s
         render["text_color"] = font_color
     if title_scale is not None:
         render["title_scale"] = title_scale
+    if title_padding_x is not None:
+        render["title_padding_x"] = title_padding_x
+    if line_height_multiplier is not None:
+        render["line_height_multiplier"] = line_height_multiplier
 
     if font_set.startswith("custom:"):
         filename = font_set.split("custom:", 1)[1].strip()
@@ -537,6 +561,10 @@ def get_workflow_status(db: Session, website: Website) -> dict[str, Any]:
     pins_per_day = max(1, int(generation.get("daily_pin_count") or DEFAULT_PINS_PER_DAY))
     window_days = max(2, min(60, int(generation.get("scheduling_window_days") or DEFAULT_WINDOW_DAYS)))
     auto_regen_enabled = bool(generation.get("auto_regeneration_enabled", False))
+    auto_regen_days_before_deadline = max(
+        0,
+        int(generation.get("auto_regeneration_days_before_deadline") or 3),
+    )
 
     now = datetime.utcnow()
     scheduled_until_row = (
@@ -574,6 +602,7 @@ def get_workflow_status(db: Session, website: Website) -> dict[str, Any]:
         "scheduled_count": scheduled_count,
         "scheduled_until": scheduled_until.isoformat() if scheduled_until else None,
         "auto_regen_enabled": auto_regen_enabled,
+        "auto_regen_days_before_deadline": auto_regen_days_before_deadline,
         "desired_gap_days": int(content.get("desired_gap_days") or 14),
         "has_active_job": bool(active_job),
         "active_job_id": active_job.id if active_job else None,
@@ -585,4 +614,5 @@ def should_auto_generate(status_payload: dict[str, Any]) -> bool:
         return False
     if status_payload.get("has_active_job"):
         return False
-    return int(status_payload.get("days_ahead_current") or 0) < int(status_payload.get("window_days") or DEFAULT_WINDOW_DAYS)
+    threshold = int(status_payload.get("auto_regen_days_before_deadline") or 3)
+    return int(status_payload.get("days_ahead_current") or 0) <= max(0, threshold)

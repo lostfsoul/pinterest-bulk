@@ -30,6 +30,8 @@ export type RenderSettings = {
   fontFamily: string;
   textColor: string;
   titleScale?: number;
+  titlePaddingX?: number;
+  lineHeightMultiplier?: number;
   imageSettings?: {
     ignoreSmallWidth?: boolean;
     minWidth?: number;
@@ -360,14 +362,21 @@ export function drawCoverCenter(ctx: CanvasRenderingContext2D, img: HTMLImageEle
   ctx.restore();
 }
 
-export function findMaxFontSize(ctx: CanvasRenderingContext2D, lines: string[], usableW: number, usableH: number, fontFamily: string): number {
+export function findMaxFontSize(
+  ctx: CanvasRenderingContext2D,
+  lines: string[],
+  usableW: number,
+  usableH: number,
+  fontFamily: string,
+  lineHeightMultiplier = 1,
+): number {
   let lo = 12;
   let hi = 200;
   let best = 12;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     ctx.font = `900 ${mid}px ${fontFamily}`;
-    const lineH = mid;
+    const lineH = mid * lineHeightMultiplier;
     const totalH = lines.length * lineH;
     const maxW = Math.max(...lines.map((line) => ctx.measureText(line).width));
     if (maxW <= usableW && totalH <= usableH) {
@@ -380,46 +389,77 @@ export function findMaxFontSize(ctx: CanvasRenderingContext2D, lines: string[], 
   return best;
 }
 
-export function fitTitle(ctx: CanvasRenderingContext2D, text: string, zoneW: number, zoneH: number, fontFamily: string): { lines: string[]; fontSize: number } {
+function wrapWords(ctx: CanvasRenderingContext2D, text: string, usableW: number): string[] {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  if (!words.length) return [''];
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const probe = current ? `${current} ${word}` : word;
+    if (!current || ctx.measureText(probe).width <= usableW) {
+      current = probe;
+      continue;
+    }
+    lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [''];
+}
+
+function linePenalty(ctx: CanvasRenderingContext2D, lines: string[]): number {
+  if (!lines.length) return 1000;
+  const widths = lines.map((line) => ctx.measureText(line).width);
+  const maxW = Math.max(...widths, 1);
+  let penalty = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const words = lines[i].split(/\s+/).filter(Boolean);
+    if (words.length === 1 && lines.length > 1) penalty += 18;
+    if (i === lines.length - 1 && widths[i] < maxW * 0.45 && lines.length > 1) penalty += 12;
+  }
+  const ratioSpread = widths.reduce((sum, width) => sum + Math.abs(maxW - width), 0) / Math.max(1, lines.length);
+  penalty += ratioSpread / Math.max(1, maxW) * 10;
+  return penalty;
+}
+
+export function fitTitle(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  zoneW: number,
+  zoneH: number,
+  fontFamily: string,
+  padX = 15,
+  lineHeightMultiplier = 1,
+): { lines: string[]; fontSize: number } {
   const upper = String(text || '').toUpperCase().trim() || 'SAMPLE TITLE';
-  const usableW = zoneW - 30;
+  const usableW = Math.max(20, zoneW - (2 * Math.max(0, padX)));
   const usableH = zoneH;
-  const words = upper.split(/\s+/).filter(Boolean);
-  let best = { lines: [upper], fontSize: 14 };
-
-  const tryLines = (lines: string[]) => {
-    const fontSize = findMaxFontSize(ctx, lines, usableW, usableH, fontFamily);
-    if (fontSize > best.fontSize) {
-      best = { lines, fontSize };
-      return;
-    }
-    if (fontSize === best.fontSize && lines.length === best.lines.length) {
-      ctx.font = `900 ${fontSize}px ${fontFamily}`;
-      const lineWidth = (items: string[]) => Math.max(...items.map((item) => ctx.measureText(item).width));
-      if (lineWidth(lines) < lineWidth(best.lines)) {
-        best = { lines, fontSize };
-      }
-    }
-  };
-
-  tryLines([upper]);
-  if (words.length >= 2) {
-    for (let i = 1; i < words.length; i += 1) {
-      tryLines([words.slice(0, i).join(' '), words.slice(i).join(' ')]);
+  let lo = 12;
+  let hi = 220;
+  let best = { lines: [upper], fontSize: 12, penalty: 9999 };
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    ctx.font = `900 ${mid}px ${fontFamily}`;
+    const lines = wrapWords(ctx, upper, usableW);
+    const lineH = mid * lineHeightMultiplier;
+    const totalH = lines.length * lineH;
+    const maxW = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
+    const fits = lines.length <= 3 && maxW <= usableW && totalH <= usableH;
+    if (fits) {
+      const penalty = linePenalty(ctx, lines);
+      best = { lines, fontSize: mid, penalty };
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
     }
   }
-  if (words.length >= 4) {
-    for (let i = 1; i < words.length - 1; i += 1) {
-      for (let j = i + 1; j < words.length; j += 1) {
-        tryLines([
-          words.slice(0, i).join(' '),
-          words.slice(i, j).join(' '),
-          words.slice(j).join(' '),
-        ]);
-      }
-    }
+  // If no fit found at >12, try smallest fallback.
+  if (best.fontSize <= 12) {
+    ctx.font = `900 12px ${fontFamily}`;
+    const lines = wrapWords(ctx, upper, usableW).slice(0, 3);
+    return { lines, fontSize: 12 };
   }
-  return best;
+  return { lines: best.lines, fontSize: best.fontSize };
 }
 
 export async function ensureFontLoaded(fontFamily: string) {
@@ -507,8 +547,6 @@ export async function renderPin(
     if (img) drawCoverCenter(ctx, img, zone.x, zone.y, zone.width, zone.height);
   });
 
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(svgData.textZoneX, svgData.textZoneY, svgData.textZoneW, svgData.textZoneH);
   ctx.drawImage(overlayCanvas, 0, 0);
 
   if (svgData.textZoneBorderColor) {
@@ -532,10 +570,24 @@ export async function renderPin(
   }
 
   await ensureFontLoaded(settings.fontFamily);
-  const { lines, fontSize } = fitTitle(ctx, title, svgData.textZoneW, svgData.textZoneH, settings.fontFamily);
+  const titlePaddingX = Number.isFinite(Number(settings.titlePaddingX))
+    ? Math.max(0, Number(settings.titlePaddingX))
+    : 15;
+  const lineHeightMultiplier = Number.isFinite(Number(settings.lineHeightMultiplier))
+    ? Math.max(0.8, Math.min(1.4, Number(settings.lineHeightMultiplier)))
+    : 1;
+  const { lines, fontSize } = fitTitle(
+    ctx,
+    title,
+    svgData.textZoneW,
+    svgData.textZoneH,
+    settings.fontFamily,
+    titlePaddingX,
+    lineHeightMultiplier,
+  );
   const titleScale = Number.isFinite(Number(settings.titleScale)) ? Number(settings.titleScale) : 1;
   const scaledFontSize = Math.max(12, Math.min(220, Math.round(fontSize * Math.max(0.6, Math.min(1.8, titleScale)))));
-  const lineH = scaledFontSize;
+  const lineH = scaledFontSize * lineHeightMultiplier;
   const centerX = svgData.textZoneX + (svgData.textZoneW / 2);
 
   ctx.font = `900 ${scaledFontSize}px ${settings.fontFamily}`;

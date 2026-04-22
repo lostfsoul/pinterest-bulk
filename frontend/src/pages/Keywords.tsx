@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import apiClient, { KeywordEntry, TrendKeywordEntry, TrendKeywordUploadResponse, Website } from '../services/api';
+import apiClient, {
+  KeywordEntry,
+  TrendKeywordEntry,
+  TrendKeywordMatchItem,
+  TrendKeywordUploadResponse,
+  Website,
+} from '../services/api';
 import { Button } from '../components/Button';
 
 interface UploadResult {
@@ -17,6 +23,18 @@ interface KeywordStatus {
   coverage_percent: number;
 }
 
+function toneForMatchCount(count: number): string {
+  if (count <= 0) return 'bg-rose-50 text-rose-700 border-rose-200';
+  if (count <= 2) return 'bg-amber-50 text-amber-700 border-amber-200';
+  return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+}
+
+function toneForScore(score: number): string {
+  if (score >= 1.5) return 'text-emerald-700';
+  if (score >= 0.8) return 'text-amber-700';
+  return 'text-slate-500';
+}
+
 export default function Keywords() {
   const [status, setStatus] = useState<KeywordStatus | null>(null);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
@@ -32,6 +50,8 @@ export default function Keywords() {
   const [loadingTrendEntries, setLoadingTrendEntries] = useState(false);
   const [trendUploading, setTrendUploading] = useState(false);
   const [trendUploadResult, setTrendUploadResult] = useState<TrendKeywordUploadResponse | null>(null);
+  const [trendMatchPreview, setTrendMatchPreview] = useState<TrendKeywordMatchItem[]>([]);
+  const [loadingTrendPreview, setLoadingTrendPreview] = useState(false);
 
   useEffect(() => {
     void loadInitial();
@@ -49,6 +69,7 @@ export default function Keywords() {
   useEffect(() => {
     void loadEntries();
     void loadTrendEntries();
+    void loadTrendMatchPreview();
   }, [activeWebsiteId]);
 
   const activeWebsite = useMemo(
@@ -121,6 +142,27 @@ export default function Keywords() {
       setTrendEntries([]);
     } finally {
       setLoadingTrendEntries(false);
+    }
+  }
+
+  async function loadTrendMatchPreview() {
+    if (!activeWebsiteId) {
+      setTrendMatchPreview([]);
+      return;
+    }
+    setLoadingTrendPreview(true);
+    try {
+      const response = await apiClient.getTrendKeywordMatchPreview({
+        website_id: activeWebsiteId,
+        pages_per_keyword: 5,
+        min_score: 0.2,
+      });
+      setTrendMatchPreview(response.data.items || []);
+    } catch (error) {
+      console.error('Failed to load trend keyword match preview:', error);
+      setTrendMatchPreview([]);
+    } finally {
+      setLoadingTrendPreview(false);
     }
   }
 
@@ -219,6 +261,7 @@ export default function Keywords() {
       const response = await apiClient.uploadTrendKeywords(websiteId, file);
       setTrendUploadResult(response.data);
       await loadTrendEntries();
+      await loadTrendMatchPreview();
     } catch (error) {
       console.error('Failed to upload trend keywords:', error);
       alert('Failed to upload trend keywords. Check CSV format.');
@@ -350,7 +393,10 @@ export default function Keywords() {
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => void loadTrendEntries()}
+            onClick={() => {
+              void loadTrendEntries();
+              void loadTrendMatchPreview();
+            }}
             disabled={loadingTrendEntries || !activeWebsiteId}
           >
             Refresh
@@ -433,6 +479,75 @@ export default function Keywords() {
               </tbody>
             </table>
           </div>
+        </div>
+
+        <div className="rounded-md border border-slate-200 bg-slate-50/50 p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-gray-900">Keyword Matching Pages Preview</h3>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => void loadTrendMatchPreview()}
+              disabled={loadingTrendPreview || !activeWebsiteId}
+            >
+              Refresh Matches
+            </Button>
+          </div>
+          <p className="mb-3 text-xs text-gray-500">
+            Each keyword shows top matching enabled pages. Red means no current matches.
+          </p>
+          {loadingTrendPreview ? (
+            <div className="text-sm text-gray-500">Loading trend matches...</div>
+          ) : trendMatchPreview.length === 0 ? (
+            <div className="text-sm text-gray-500">
+              {activeWebsiteId ? 'No trend keyword matches available yet.' : 'No website selected.'}
+            </div>
+          ) : (
+            <div className="max-h-[420px] space-y-3 overflow-auto pr-1">
+              {trendMatchPreview.map((item) => (
+                <div key={item.keyword} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                  <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <div className="font-medium text-slate-900">{item.keyword}</div>
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700">
+                          Weight {item.weight}
+                        </span>
+                        <span className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${toneForMatchCount(item.matched_count)}`}>
+                          {item.matched_count} match{item.matched_count === 1 ? '' : 'es'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="h-2 w-24 overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className={`h-full ${item.matched_count <= 0 ? 'bg-rose-400' : item.matched_count <= 2 ? 'bg-amber-400' : 'bg-emerald-400'}`}
+                        style={{ width: `${Math.min(100, item.matched_count * 15)}%` }}
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    {item.matched_pages.length === 0 ? (
+                      <div className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+                        No matching enabled pages for this keyword right now.
+                      </div>
+                    ) : (
+                      item.matched_pages.map((page) => (
+                        <div key={`${item.keyword}-${page.page_id}`} className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="truncate font-medium text-slate-800">{page.title}</div>
+                            <div className={`font-semibold ${toneForScore(page.score)}`}>
+                              {page.score.toFixed(2)}
+                            </div>
+                          </div>
+                          <div className="truncate text-slate-500">{page.url}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

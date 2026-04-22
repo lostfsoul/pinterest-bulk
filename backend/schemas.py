@@ -311,6 +311,8 @@ class PinRenderSettings(BaseModel):
     text_effect_offset_y: int | None = None
     text_effect_blur: int | None = None
     title_scale: float | None = None
+    title_padding_x: int | None = None
+    line_height_multiplier: float | None = None
     custom_font_file: str | None = None
 
 
@@ -359,6 +361,8 @@ class PinDraftDetailResponse(BaseModel):
 
 class PinDraftUpdate(BaseModel):
     """Schema for updating pin draft."""
+    template_id: int | None = None
+    selected_image_url: str | None = None
     title: str | None = None
     description: str | None = None
     board_name: str | None = None

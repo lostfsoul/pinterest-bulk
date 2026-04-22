@@ -234,6 +234,24 @@ function maxLineWidth(ctx, lines) {
     return Math.max(...lines.map((line) => ctx.measureText(String(line || '')).width), 0);
 }
 
+function wrapLinesByWidth(ctx, source, usableW) {
+    const words = String(source || '').split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [''];
+    const lines = [];
+    let current = '';
+    for (const word of words) {
+        const probe = current ? `${current} ${word}` : word;
+        if (!current || ctx.measureText(probe).width <= usableW) {
+            current = probe;
+            continue;
+        }
+        lines.push(current);
+        current = word;
+    }
+    if (current) lines.push(current);
+    return lines.length ? lines : [''];
+}
+
 function findMaxFontSizeForLines(ctx, lines, usableW, usableH, fontFamily, fontWeight) {
     let lo = 6;
     let hi = 220;
@@ -266,6 +284,7 @@ function fitTitleNoOverflow(ctx, text, options) {
         effectMarginX = 0,
         effectMarginY = 0,
         uppercase = true,
+        lineHeightMultiplier = 1.0,
     } = options || {};
 
     const family = normalizeFontFamily(fontFamily);
@@ -275,49 +294,29 @@ function fitTitleNoOverflow(ctx, text, options) {
     const usableH = Math.max(20, Number(zoneH || 0) - (2 * Math.abs(padY)) - (2 * Math.abs(effectMarginY)));
     const allowedLines = Math.max(1, Number(maxLines || 1));
 
-    const candidates = [];
-    const pushCandidate = (lines) => {
-        if (!Array.isArray(lines) || lines.length === 0) return;
-        if (lines.length > allowedLines) return;
-        candidates.push(lines.map((line) => String(line || '').trim()).filter(Boolean));
-    };
+    let lo = 6;
+    let hi = 220;
+    let best = { lines: [source || ''], fontSize: 6, family, weight: fontWeight };
+    const lineMul = Math.max(0.8, Math.min(1.4, Number(lineHeightMultiplier || 1)));
 
-    pushCandidate([source]);
-    if (words.length >= 2 && allowedLines >= 2) {
-        for (let i = 1; i < words.length; i += 1) {
-            pushCandidate([words.slice(0, i).join(' '), words.slice(i).join(' ')]);
+    while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        ctx.font = `${fontWeight} ${mid}px ${family}`.trim();
+        let lines = wrapLinesByWidth(ctx, source || '', usableW);
+        if (lines.length > allowedLines) {
+            lines = lines.slice(0, allowedLines);
+            const tail = source.split(/\s+/).slice(lines.join(' ').split(/\s+/).length).join(' ');
+            if (tail) lines[lines.length - 1] = `${lines[lines.length - 1]} ${tail}`.trim();
         }
-    }
-    if (words.length >= 4 && allowedLines >= 3) {
-        for (let i = 1; i < words.length - 1; i += 1) {
-            for (let j = i + 1; j < words.length; j += 1) {
-                pushCandidate([
-                    words.slice(0, i).join(' '),
-                    words.slice(i, j).join(' '),
-                    words.slice(j).join(' '),
-                ]);
-            }
-        }
-    }
-
-    if (candidates.length === 0) {
-        candidates.push([source || '']);
-    }
-
-    let best = { lines: candidates[0], fontSize: 6, family, weight: fontWeight };
-    for (const lines of candidates) {
-        const fontSize = findMaxFontSizeForLines(ctx, lines, usableW, usableH, family, fontWeight);
-        if (fontSize > best.fontSize) {
-            best = { lines, fontSize, family, weight: fontWeight };
-            continue;
-        }
-        if (fontSize === best.fontSize) {
-            ctx.font = `${fontWeight} ${fontSize}px ${family}`.trim();
-            const currentWidth = maxLineWidth(ctx, lines);
-            const bestWidth = maxLineWidth(ctx, best.lines);
-            if (currentWidth < bestWidth) {
-                best = { lines, fontSize, family, weight: fontWeight };
-            }
+        const lineH = mid * lineMul;
+        const totalH = lines.length * lineH;
+        const maxW = maxLineWidth(ctx, lines);
+        const fits = lines.length <= allowedLines && maxW <= usableW && totalH <= usableH;
+        if (fits) {
+            best = { lines, fontSize: mid, family, weight: fontWeight };
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
     }
 
@@ -326,7 +325,7 @@ function fitTitleNoOverflow(ctx, text, options) {
     while (fontSize >= 6) {
         ctx.font = `${fontWeight} ${fontSize}px ${family}`.trim();
         lines = lines.map((line) => trimWithEllipsis(ctx, line, usableW));
-        const totalH = lines.length * (fontSize * 1.0);
+        const totalH = lines.length * (fontSize * lineMul);
         const maxW = maxLineWidth(ctx, lines);
         if (maxW <= usableW && totalH <= usableH) {
             break;
@@ -453,23 +452,26 @@ function drawFittedTextBlock(ctx, text, rect, style) {
     const height = Number(rect?.height || 0);
     if (width <= 4 || height <= 4) return;
 
+    const padX = Number(style.titlePaddingX ?? style.padX ?? 15);
+    const lineHeightMultiplier = Number(style.lineHeightMultiplier ?? 1);
     const fitOptions = {
         zoneW: width,
         zoneH: height,
         fontFamily: style.fontFamily,
         fontWeight: style.fontWeight || '900',
         maxLines: style.maxLines || 3,
-        padX: 15,
+        padX,
         padY: 0,
         effectMarginX: Number(style.textEffectOffsetX || 2),
         effectMarginY: Number(style.textEffectOffsetY || 2) + Number(style.textEffectBlur || 0),
         uppercase: Boolean(style.uppercase),
         preferredFontSize: Number(style.preferredFontSize || 0),
+        lineHeightMultiplier,
     };
     const fitted = style.forceTitleFit
         ? fitTitleNoOverflow(ctx, text, fitOptions)
         : fitTextBlock(ctx, text, fitOptions);
-    const usableW = Math.max(20, Number(width || 0) - 30 - (2 * Math.abs(Number(style.textEffectOffsetX || 2))));
+    const usableW = Math.max(20, Number(width || 0) - (2 * Math.max(0, padX)) - (2 * Math.abs(Number(style.textEffectOffsetX || 2))));
     const usableH = Math.max(20, Number(height || 0) - (2 * Math.abs(Number(style.textEffectOffsetY || 2) + Number(style.textEffectBlur || 0))));
     const scaledFitted = style.forceTitleFit
         ? applyTitleScaleToFitted(ctx, fitted, usableW, usableH, style.titleScale)
@@ -480,15 +482,15 @@ function drawFittedTextBlock(ctx, text, rect, style) {
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = align;
 
-    const lineH = scaledFitted.fontSize * 1.0;
+    const lineH = scaledFitted.fontSize * Math.max(0.8, Math.min(1.4, lineHeightMultiplier));
     const m = ctx.measureText('A');
     const capAscent = m.actualBoundingBoxAscent || scaledFitted.fontSize * 0.72;
     const capDescent = m.actualBoundingBoxDescent || 0;
     const visualH = capAscent + capDescent + (scaledFitted.lines.length - 1) * lineH;
     const firstBase = y + (height - visualH) / 2 + capAscent;
     const centerX = x + (width / 2);
-    const leftX = x + 15;
-    const rightX = x + width - 15;
+    const leftX = x + padX;
+    const rightX = x + width - padX;
 
     const positions = scaledFitted.lines.map((line, index) => {
         const lineY = firstBase + index * lineH;
@@ -928,6 +930,8 @@ async function renderPinWithResvg(renderData) {
     const titleFamily = titleCustomAlias || titleBuiltinAlias || settings.fontFamily || '"Poppins", "Segoe UI", Arial, sans-serif';
     const titleWeight = titleUsesCustom ? '400' : '900';
     const titleAlign = settings.textAlign === 'left' ? 'left' : settings.textAlign === 'right' ? 'right' : 'center';
+    const titlePadX = Math.max(8, Math.min(36, safeNumber(settings.titlePaddingX ?? settings.title_padding_x, 15)));
+    const lineHeightMultiplier = Math.max(0.8, Math.min(1.4, safeNumber(settings.lineHeightMultiplier ?? settings.line_height_multiplier, 1)));
     const titleClipId = 'clip_title_zone';
     clipPaths.push(`<clipPath id="${titleClipId}"><rect x="${padL}" y="${textZoneY}" width="${textAreaW}" height="${textZoneH}" /></clipPath>`);
     let titleMarkup = '';
@@ -939,17 +943,18 @@ async function renderPinWithResvg(renderData) {
             fontFamily: titleFamily,
             fontWeight: titleWeight,
             maxLines: 3,
-            padX: 15,
+            padX: titlePadX,
             padY: 0,
             effectMarginX: safeNumber(settings.textEffectOffsetX, 2),
             effectMarginY: safeNumber(settings.textEffectOffsetY, 2) + safeNumber(settings.textEffectBlur, 0),
             uppercase: true,
+            lineHeightMultiplier,
         });
         const titleScale = clampTitleScale(settings.titleScale ?? settings.title_scale, 1);
-        const usableW = Math.max(20, textAreaW - 30 - (2 * Math.abs(safeNumber(settings.textEffectOffsetX, 2))));
+        const usableW = Math.max(20, textAreaW - (2 * titlePadX) - (2 * Math.abs(safeNumber(settings.textEffectOffsetX, 2))));
         const usableH = Math.max(20, textZoneH - (2 * Math.abs(safeNumber(settings.textEffectOffsetY, 2) + safeNumber(settings.textEffectBlur, 0))));
         const fitted = applyTitleScaleToFitted(ctx, fittedBase, usableW, usableH, titleScale);
-        const lineH = fitted.fontSize * 1.0;
+        const lineH = fitted.fontSize * lineHeightMultiplier;
         ctx.font = `${fitted.weight} ${fitted.fontSize}px ${fitted.family}`.trim();
         const metrics = ctx.measureText('A');
         const capAscent = metrics.actualBoundingBoxAscent || fitted.fontSize * 0.72;
@@ -957,8 +962,8 @@ async function renderPinWithResvg(renderData) {
         const visualH = capAscent + capDescent + (fitted.lines.length - 1) * lineH;
         const firstBase = textZoneY + (textZoneH - visualH) / 2 + capAscent;
         const centerX = padL + (textAreaW / 2);
-        const leftX = padL + 15;
-        const rightX = padL + textAreaW - 15;
+        const leftX = padL + titlePadX;
+        const rightX = padL + textAreaW - titlePadX;
         const positions = fitted.lines.map((line, index) => {
             const y = firstBase + index * lineH;
             if (titleAlign === 'left') return { x: leftX, y };
@@ -993,7 +998,7 @@ async function renderPinWithResvg(renderData) {
             textEffectOffsetY: safeNumber(settings.textEffectOffsetY, 2),
             textEffectBlur: blur,
             clipId: titleClipId,
-            maxTextWidth: Math.max(20, textAreaW - 30),
+            maxTextWidth: Math.max(20, textAreaW - (2 * titlePadX)),
             effectFilterId,
         });
     }
@@ -1122,7 +1127,6 @@ async function renderPinWithResvg(renderData) {
         styleBlock,
         `<rect width="${width}" height="${height}" fill="#ffffff" />`,
         imageEls.join(''),
-        `<rect x="${padL}" y="${textZoneY}" width="${textAreaW}" height="${textZoneH}" fill="${xmlEscapeAttr(settings.textZoneBgColor || '#ffffff')}" />`,
         overlayMarkup,
         borderRect,
         titleMarkup,
@@ -1216,18 +1220,13 @@ async function renderPin(renderData) {
             }
         }
 
-        // 4. Draw text zone background
-        console.error(`[DEBUG] Drawing text zone background`);
+        // 4. Resolve text zone geometry.
         const textZoneY = template.textZoneY;
         const textZoneH = template.textZoneHeight;
         const padL = settings.textZonePadLeft || 0;
         const padR = settings.textZonePadRight || 0;
         const textAreaW = canvasW - padL - padR;
-
-        ctx.fillStyle = settings.textZoneBgColor || '#ffffff';
-        ctx.fillRect(padL, textZoneY, textAreaW, textZoneH);
-
-        // 5. Draw template overlay after text-zone background (matches Playground preview).
+        // 5. Draw template overlay. Keep template background as uploaded.
         if (template.overlaySvg && template.overlaySvg.trim() !== '<svg></svg>') {
             console.error(`[DEBUG] Drawing overlay SVG`);
             const overlayImg = await renderOverlaySVG(template.overlaySvg, canvasW, canvasH);
@@ -1314,6 +1313,8 @@ async function renderPin(renderData) {
                     maxLines: 3,
                     uppercase: true,
                     titleScale: clampTitleScale(settings.titleScale ?? settings.title_scale, 1),
+                    titlePaddingX: Number(settings.titlePaddingX ?? settings.title_padding_x ?? 15),
+                    lineHeightMultiplier: Number(settings.lineHeightMultiplier ?? settings.line_height_multiplier ?? 1),
                     forceTitleFit: true,
                 });
             }

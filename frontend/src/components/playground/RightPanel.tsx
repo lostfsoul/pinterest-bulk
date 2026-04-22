@@ -22,6 +22,10 @@ type RightPanelProps = {
   onSetDefaultTemplate: (id: number) => void;
   titleScale: number;
   onTitleScaleChange: (value: number) => void;
+  titlePaddingX: number;
+  onTitlePaddingXChange: (value: number) => void;
+  lineHeightMultiplier: number;
+  onLineHeightMultiplierChange: (value: number) => void;
   metadata: PlaygroundPreviewMeta | null;
   loading: boolean;
   zoom: ZoomLevel;
@@ -36,6 +40,7 @@ type RightPanelProps = {
   scheduledDate: string | null;
   onChangeDate: (value: string | null) => void;
   activeFontFamily: string;
+  activeFontFile?: string | null;
   pageImages: string[];
   scrapedTitle: string;
   imageSettings: ImageSettingsState;
@@ -59,6 +64,10 @@ export default function RightPanel({
   onSetDefaultTemplate,
   titleScale,
   onTitleScaleChange,
+  titlePaddingX,
+  onTitlePaddingXChange,
+  lineHeightMultiplier,
+  onLineHeightMultiplierChange,
   metadata,
   loading,
   zoom,
@@ -73,6 +82,7 @@ export default function RightPanel({
   scheduledDate,
   onChangeDate,
   activeFontFamily,
+  activeFontFile,
   pageImages,
   scrapedTitle,
   imageSettings,
@@ -95,7 +105,12 @@ export default function RightPanel({
                 <Shuffle className="h-4 w-4" />
                 Randomize
               </Button>
-              <Button variant="secondary" size="sm" onClick={onGenerateAiContent} disabled={generatingAi}>
+              <Button
+                size="sm"
+                onClick={onGenerateAiContent}
+                disabled={generatingAi}
+                className="bg-blue-600 text-white hover:bg-blue-700 disabled:bg-blue-300"
+              >
                 {generatingAi ? 'Generating AI...' : 'Generate AI Content'}
               </Button>
               <Button variant="outline" size="icon" title="Download" disabled>
@@ -114,17 +129,17 @@ export default function RightPanel({
 
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={onPrevVariant}>‹</Button>
+            <button className={`rounded-md px-3 py-1.5 text-xs ${zoom === 0.6 ? 'bg-blue-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`} onClick={() => onZoomChange(0.6)}>0.6x</button>
+            <button className={`rounded-md px-3 py-1.5 text-xs ${zoom === 0.8 ? 'bg-blue-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`} onClick={() => onZoomChange(0.8)}>0.8x</button>
             <button className={`rounded-md px-3 py-1.5 text-xs ${zoom === 1 ? 'bg-blue-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`} onClick={() => onZoomChange(1)}>1x</button>
-            <button className={`rounded-md px-3 py-1.5 text-xs ${zoom === 1.5 ? 'bg-blue-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`} onClick={() => onZoomChange(1.5)}>1.5x</button>
-            <button className={`rounded-md px-3 py-1.5 text-xs ${zoom === 2 ? 'bg-blue-600 text-white' : 'border border-slate-300 bg-white text-slate-700'}`} onClick={() => onZoomChange(2)}>2x</button>
             <Button variant="outline" size="sm" onClick={onNextVariant}>›</Button>
             <span className="text-xs text-slate-500">Variant {Math.min(variantTotal, variantIndex + 1)} / {variantTotal}</span>
           </div>
 
           <div className="grid grid-cols-1 gap-3 2xl:grid-cols-[minmax(0,1fr)_330px]">
             <div className="rounded-lg border border-slate-200 bg-slate-950 p-3 text-white">
-              <div className="mx-auto max-w-[430px]">
-                <div className="min-h-[620px] overflow-auto rounded-md border border-white/20 bg-black/60">
+              <div className="mx-auto w-full max-w-[520px]">
+                <div className="min-h-[620px] overflow-auto rounded-md border border-white/20 bg-black/60 p-2">
                   {activeTemplate ? (
                     <SvgRenderer
                       templatePath={activeTemplate.path}
@@ -132,11 +147,14 @@ export default function RightPanel({
                       title={previewTitle}
                       fontFamily={activeFontFamily}
                       fontSetId={activeFontSetId}
+                      fontFile={activeFontFile}
                       textColor={activeFontColor}
                       titleScale={titleScale}
+                      titlePaddingX={titlePaddingX}
+                      lineHeightMultiplier={lineHeightMultiplier}
                       imageSettings={imageSettings}
                       zoom={zoom}
-                      className="w-[420px]"
+                      className="w-full"
                     />
                   ) : (
                     <div className="p-4 text-xs text-slate-300">Select a template to preview.</div>
@@ -163,6 +181,10 @@ export default function RightPanel({
                 onSetDefaultTemplate={onSetDefaultTemplate}
                 titleScale={titleScale}
                 onTitleScaleChange={onTitleScaleChange}
+                titlePaddingX={titlePaddingX}
+                onTitlePaddingXChange={onTitlePaddingXChange}
+                lineHeightMultiplier={lineHeightMultiplier}
+                onLineHeightMultiplierChange={onLineHeightMultiplierChange}
               />
             </div>
           </div>

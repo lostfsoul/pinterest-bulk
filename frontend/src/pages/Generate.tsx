@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, ExternalLink, X } from 'lucide-react';
-import apiClient, { PinDetail, PinDraft, Website } from '../services/api';
+import apiClient, { PinDetail, PinDraft, PlaygroundTemplateItem, Website } from '../services/api';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -44,6 +44,18 @@ export default function Generate() {
   const [calendarPinDetail, setCalendarPinDetail] = useState<PinDetail | null>(null);
   const [calendarDetailLoading, setCalendarDetailLoading] = useState(false);
   const [calendarPinMutationId, setCalendarPinMutationId] = useState<number | null>(null);
+  const [regenOpen, setRegenOpen] = useState(false);
+  const [regenPinId, setRegenPinId] = useState<number | null>(null);
+  const [regenTemplates, setRegenTemplates] = useState<PlaygroundTemplateItem[]>([]);
+  const [regenDetail, setRegenDetail] = useState<PinDetail | null>(null);
+  const [regenTemplateId, setRegenTemplateId] = useState<number | null>(null);
+  const [regenImageUrl, setRegenImageUrl] = useState<string>('');
+  const [regenAiContent, setRegenAiContent] = useState(true);
+  const [regenCandidate, setRegenCandidate] = useState<{ title: string; description: string; board_name: string } | null>(null);
+  const [regenAvailableImages, setRegenAvailableImages] = useState<string[]>([]);
+  const [regenLoading, setRegenLoading] = useState(false);
+  const [regenApplying, setRegenApplying] = useState(false);
+  const [regenError, setRegenError] = useState('');
   const [exporting, setExporting] = useState(false);
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; message: string }>({
     type: 'idle',
@@ -148,6 +160,100 @@ export default function Generate() {
     setSelectedCalendarPinId(null);
     setCalendarPinDetail(null);
     setCalendarDetailLoading(false);
+  }
+
+  function closeRegenerateModal() {
+    setRegenOpen(false);
+    setRegenPinId(null);
+    setRegenTemplateId(null);
+    setRegenImageUrl('');
+    setRegenCandidate(null);
+    setRegenAvailableImages([]);
+    setRegenError('');
+    setRegenLoading(false);
+    setRegenApplying(false);
+  }
+
+  async function loadRegenerateCandidate(pinId: number, options?: {
+    templateId?: number | null;
+    imageUrl?: string | null;
+    regenerateAi?: boolean;
+  }) {
+    setRegenLoading(true);
+    setRegenError('');
+    try {
+      const response = await apiClient.regeneratePinPreview(pinId, {
+        template_id: options?.templateId ?? regenTemplateId,
+        selected_image_url: options?.imageUrl ?? regenImageUrl,
+        regenerate_ai_content: options?.regenerateAi ?? regenAiContent,
+      });
+      const data = response.data;
+      setRegenTemplateId(data.template_id);
+      setRegenImageUrl(data.selected_image_url || '');
+      setRegenAvailableImages(data.available_images || []);
+      setRegenCandidate(data.candidate);
+    } catch (error) {
+      console.error('Failed to generate pin replacement candidate:', error);
+      setRegenError('Failed to generate replacement candidate.');
+    } finally {
+      setRegenLoading(false);
+    }
+  }
+
+  async function openRegenerateModal(pin: PinDraft) {
+    setRegenOpen(true);
+    setRegenPinId(pin.id);
+    setRegenTemplateId(pin.template_id ?? null);
+    setRegenImageUrl(pin.selected_image_url || '');
+    setRegenCandidate(null);
+    setRegenAvailableImages([]);
+    setRegenError('');
+    setRegenLoading(true);
+    try {
+      const [detailRes, templatesRes] = await Promise.all([
+        apiClient.getPinDetail(pin.id),
+        apiClient.getPlaygroundTemplates(),
+      ]);
+      setRegenDetail(detailRes.data);
+      setRegenTemplates(templatesRes.data.templates || []);
+      await loadRegenerateCandidate(pin.id, {
+        templateId: pin.template_id ?? null,
+        imageUrl: pin.selected_image_url,
+        regenerateAi: regenAiContent,
+      });
+    } catch (error) {
+      console.error('Failed to open regenerate modal:', error);
+      setRegenError('Failed to load regenerate form.');
+      setRegenLoading(false);
+    }
+  }
+
+  async function applyRegenerateCandidate() {
+    if (!regenPinId || !regenCandidate) return;
+    setRegenApplying(true);
+    setRegenError('');
+    try {
+      await apiClient.regeneratePinApply(regenPinId, {
+        template_id: regenTemplateId,
+        selected_image_url: regenImageUrl || null,
+        title: regenCandidate.title,
+        description: regenCandidate.description,
+        board_name: regenCandidate.board_name,
+      });
+      if (activeWebsiteId) {
+        await refreshPins(activeWebsiteId);
+      }
+      if (selectedCalendarPinId === regenPinId) {
+        await openCalendarPinDetail(regenPinId);
+      }
+      closeRegenerateModal();
+      setStatus({ type: 'success', message: 'Pin regeneration started. Rendering in background.' });
+    } catch (error) {
+      console.error('Failed to apply regenerate candidate:', error);
+      setRegenError('Failed to apply changes.');
+    } finally {
+      setRegenApplying(false);
+    }
   }
 
   async function updateCalendarPinStatus(pin: PinDraft, approved: boolean) {
@@ -358,7 +464,15 @@ export default function Generate() {
                         <Badge variant={pinApproved ? 'secondary' : 'outline'}>
                           {pinApproved ? 'Approved' : 'Rejected'}
                         </Badge>
-                        <div className="grid grid-cols-2 gap-1">
+                        <div className="grid grid-cols-3 gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void openRegenerateModal(pin)}
+                            disabled={calendarPinMutationId !== null}
+                          >
+                            Regen
+                          </Button>
                           <Button
                             size="sm"
                             variant="outline"
@@ -439,6 +553,106 @@ export default function Generate() {
               </div>
             )}
           </aside>
+        </div>
+      )}
+
+      {regenOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/45 p-4" onClick={closeRegenerateModal}>
+          <div
+            className="mx-auto mt-6 w-full max-w-4xl rounded-lg border border-slate-200 bg-white p-4 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-slate-900">Regenerate Pin</h3>
+              <Button size="sm" variant="outline" onClick={closeRegenerateModal}>Close</Button>
+            </div>
+            {regenError && (
+              <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{regenError}</div>
+            )}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Template</label>
+                  <select
+                    value={regenTemplateId ?? ''}
+                    onChange={(event) => setRegenTemplateId(Number(event.target.value))}
+                    className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"
+                  >
+                    {regenTemplates.map((template) => (
+                      <option key={template.id} value={template.id}>{template.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Selected Image</label>
+                  <select
+                    value={regenImageUrl}
+                    onChange={(event) => setRegenImageUrl(event.target.value)}
+                    className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm"
+                  >
+                    {regenAvailableImages.map((url) => (
+                      <option key={url} value={url}>{url}</option>
+                    ))}
+                  </select>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={regenAiContent}
+                    onChange={(event) => setRegenAiContent(event.target.checked)}
+                  />
+                  Regenerate AI title/description
+                </label>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (regenPinId) {
+                      void loadRegenerateCandidate(regenPinId, {
+                        templateId: regenTemplateId,
+                        imageUrl: regenImageUrl,
+                        regenerateAi: regenAiContent,
+                      });
+                    }
+                  }}
+                  disabled={regenLoading || !regenPinId}
+                >
+                  {regenLoading ? 'Generating...' : 'Generate Candidate'}
+                </Button>
+                <div className="rounded-md border border-slate-200 p-3">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Page Images</div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(regenDetail?.images || []).map((image) => (
+                      <button
+                        key={image.id}
+                        className={`overflow-hidden rounded border ${regenImageUrl === image.url ? 'border-slate-500 ring-1 ring-slate-300' : 'border-slate-200'}`}
+                        onClick={() => setRegenImageUrl(image.url)}
+                        title={image.url}
+                      >
+                        <img src={apiClient.proxyImageUrl(image.url)} alt="" className="h-16 w-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <div className="rounded-md border border-slate-200 p-3">
+                  <div className="mb-1 text-xs font-medium text-slate-500">Pinterest Title</div>
+                  <div className="text-sm text-slate-900">{regenCandidate?.title || '-'}</div>
+                </div>
+                <div className="rounded-md border border-slate-200 p-3">
+                  <div className="mb-1 text-xs font-medium text-slate-500">Description</div>
+                  <div className="text-sm text-slate-700 whitespace-pre-wrap">{regenCandidate?.description || '-'}</div>
+                </div>
+                <div className="rounded-md border border-slate-200 p-3">
+                  <div className="mb-1 text-xs font-medium text-slate-500">Board</div>
+                  <div className="text-sm text-slate-900">{regenCandidate?.board_name || '-'}</div>
+                </div>
+                <Button onClick={() => void applyRegenerateCandidate()} disabled={regenApplying || regenLoading || !regenCandidate}>
+                  {regenApplying ? 'Applying...' : 'Apply and Re-render'}
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -14,8 +14,11 @@ type SvgRendererProps = {
   title: string;
   fontFamily: string;
   fontSetId?: string;
+  fontFile?: string | null;
   textColor: string;
   titleScale?: number;
+  titlePaddingX?: number;
+  lineHeightMultiplier?: number;
   imageSettings?: {
     ignoreSmallWidth?: boolean;
     minWidth?: number;
@@ -24,7 +27,7 @@ type SvgRendererProps = {
     allowedOrientations?: Array<'portrait' | 'square' | 'landscape'>;
     limitImagesPerPage?: boolean;
   };
-  zoom: 1 | 1.5 | 2;
+  zoom: 0.6 | 0.8 | 1;
   className?: string;
 };
 
@@ -34,8 +37,11 @@ export default function SvgRenderer({
   title,
   fontFamily,
   fontSetId,
+  fontFile,
   textColor,
   titleScale = 1,
+  titlePaddingX = 15,
+  lineHeightMultiplier = 1,
   imageSettings,
   zoom,
   className = '',
@@ -104,7 +110,9 @@ export default function SvgRenderer({
       try {
         const primaryFontName = fontFamily.match(/"([^"]+)"/)?.[1]
           || fontFamily.split(',')[0].replace(/"/g, '').trim();
-        if (fontSetId && fontSetId.startsWith('custom:')) {
+        if (fontFile) {
+          await ensureLocalFontLoaded(primaryFontName, fontFile);
+        } else if (fontSetId && fontSetId.startsWith('custom:')) {
           const filename = fontSetId.replace('custom:', '');
           await ensureLocalFontLoaded(primaryFontName, filename);
         } else {
@@ -114,6 +122,8 @@ export default function SvgRenderer({
           fontFamily,
           textColor,
           titleScale,
+          titlePaddingX,
+          lineHeightMultiplier,
           imageSettings,
         });
         if (!active || !canvasRef.current) return;
@@ -135,7 +145,7 @@ export default function SvgRenderer({
     return () => {
       active = false;
     };
-  }, [svgData, overlayCanvas, pageImages, title, fontFamily, fontSetId, textColor, titleScale, imageSettings]);
+  }, [svgData, overlayCanvas, pageImages, title, fontFamily, fontSetId, fontFile, textColor, titleScale, titlePaddingX, lineHeightMultiplier, imageSettings]);
 
   if (!templateUrl) {
     return <div className={`text-xs text-gray-500 ${className}`}>No template selected.</div>;

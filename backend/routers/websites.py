@@ -345,6 +345,7 @@ def get_generation_settings(website_id: int, db: Session = Depends(get_db)):
             "daily_pin_count": 5,
             "scheduling_window_days": 33,
             "auto_regeneration_enabled": False,
+            "auto_regeneration_days_before_deadline": 3,
             "warmup_month": False,
             "floating_days": True,
             "randomize_posting_times": True,

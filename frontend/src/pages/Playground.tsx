@@ -19,6 +19,8 @@ const DEFAULT_STATE: PlaygroundState = {
     customPrompt: '',
     language: 'English',
     promptEnabled: true,
+    templateTitleMode: 'original',
+    templateTitlePrompt: 'Rewrite this Pinterest title based on {{title}} while keeping intent and clarity.',
   },
   selectedFontSetId: '',
   selectedTemplateIds: [],
@@ -46,12 +48,51 @@ const DEFAULT_STATE: PlaygroundState = {
   activeTemplateId: null,
   activeFontSetId: '',
   activeFontColor: '#1a1a1a',
-  zoom: 1,
+  zoom: 0.8,
   scheduledDate: null,
 };
 
 function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
+}
+
+function normalizeFontSets(fonts: PlaygroundFontSet[]): PlaygroundFontSet[] {
+  const seenPresetFamilies = new Set<string>();
+  const seenCustomFiles = new Set<string>();
+  const seenCustomFamilies = new Set<string>();
+  const result: PlaygroundFontSet[] = [];
+
+  const normalizeFamily = (value: string): string => (
+    String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/[^a-z0-9 ]/g, '')
+  );
+
+  for (const font of fonts) {
+    const id = String(font.id || '').trim();
+    if (!id) continue;
+    if (!id.startsWith('custom:')) {
+      const presetFamilyKey = normalizeFamily(String(font.main || '')) || id.toLowerCase();
+      if (seenPresetFamilies.has(presetFamilyKey)) continue;
+      seenPresetFamilies.add(presetFamilyKey);
+      result.push(font);
+      continue;
+    }
+    const fileKey = String(font.font_file || '').trim().toLowerCase()
+      || id.replace(/^custom:/i, '').trim().toLowerCase();
+    if (fileKey && seenCustomFiles.has(fileKey)) continue;
+
+    const familyKey = normalizeFamily(String(font.main || '')) || fileKey || id.toLowerCase();
+    if (seenCustomFamilies.has(familyKey)) continue;
+    if (fileKey) seenCustomFiles.add(fileKey);
+    seenCustomFamilies.add(familyKey);
+    result.push(font);
+  }
+
+  return result;
 }
 
 export default function Playground() {
@@ -74,7 +115,12 @@ export default function Playground() {
   const [isScraping, setIsScraping] = useState(false);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
   const [titleScale, setTitleScale] = useState(1);
+  const [titlePaddingX, setTitlePaddingX] = useState(15);
+  const [lineHeightMultiplier, setLineHeightMultiplier] = useState(1);
   const initialStateRef = useRef<PlaygroundState | null>(null);
+  const initialTitleScaleRef = useRef<number>(1);
+  const initialTitlePaddingRef = useRef<number>(15);
+  const initialLineHeightRef = useRef<number>(1);
 
   const selectedPage = useMemo(
     () => pages.find((page) => page.url === state.selectedPageUrl) || null,
@@ -109,6 +155,29 @@ export default function Playground() {
   }, []);
 
   useEffect(() => {
+    const onWebsiteSwitch = (event: Event) => {
+      const custom = event as CustomEvent<number | null>;
+      const nextId = Number(custom.detail);
+      if (Number.isFinite(nextId) && nextId > 0) {
+        setWebsiteId(nextId);
+      }
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== 'active_website_id') return;
+      const nextId = Number(event.newValue);
+      if (Number.isFinite(nextId) && nextId > 0) {
+        setWebsiteId(nextId);
+      }
+    };
+    window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!websiteId) return;
     let active = true;
     const load = async () => {
@@ -123,10 +192,10 @@ export default function Playground() {
         if (!active) return;
         setPages(pagesRes.data);
         setTemplates(templatesRes.data.templates || []);
-        const filteredFonts = fontsRes.data.filter((font) => (
+        const filteredFonts = normalizeFontSets(fontsRes.data.filter((font) => (
           String(font.id || '').startsWith('custom:')
           || String(font.id || '').startsWith('font_combo_')
-        ));
+        )));
         setFontSets(filteredFonts);
 
         const settings = settingsRes.data;
@@ -170,7 +239,7 @@ export default function Playground() {
           activeTemplateId: defaultTemplateId ?? selectedTemplates[0] ?? (templatesRes.data.templates || [])[0]?.id ?? null,
           activeFontSetId: fontSetId,
           activeFontColor: String(settings.font_color || '#1a1a1a'),
-          zoom: 1,
+          zoom: 0.8,
           scheduledDate: null,
         };
         setState(nextState);
@@ -179,6 +248,25 @@ export default function Playground() {
           ? Math.max(0.7, Math.min(1.6, persistedScale))
           : 1;
         setTitleScale(safeScale);
+        const persistedPadding = Number((settings as any).title_padding_x);
+        setTitlePaddingX(
+          Number.isFinite(persistedPadding)
+            ? Math.max(8, Math.min(36, persistedPadding))
+            : 15,
+        );
+        const persistedLineHeight = Number((settings as any).line_height_multiplier);
+        setLineHeightMultiplier(
+          Number.isFinite(persistedLineHeight)
+            ? Math.max(0.8, Math.min(1.35, persistedLineHeight))
+            : 1,
+        );
+        initialTitleScaleRef.current = safeScale;
+        initialTitlePaddingRef.current = Number.isFinite(persistedPadding)
+          ? Math.max(8, Math.min(36, persistedPadding))
+          : 15;
+        initialLineHeightRef.current = Number.isFinite(persistedLineHeight)
+          ? Math.max(0.8, Math.min(1.35, persistedLineHeight))
+          : 1;
         initialStateRef.current = nextState;
         setVariantIndex(0);
         if (nextState.selectedPageUrl) {
@@ -259,12 +347,17 @@ export default function Playground() {
         font_set: state.selectedFontSetId,
         font_color: state.activeFontColor,
         title_scale: titleScale,
+        title_padding_x: titlePaddingX,
+        line_height_multiplier: lineHeightMultiplier,
         image_settings: state.imageSettings as unknown as Record<string, unknown>,
         display_settings: state.displaySettings as unknown as Record<string, unknown>,
         advanced_settings: state.advancedSettings as unknown as Record<string, unknown>,
       };
       await apiClient.savePlaygroundSettings(websiteId, payload);
       initialStateRef.current = { ...state };
+      initialTitleScaleRef.current = titleScale;
+      initialTitlePaddingRef.current = titlePaddingX;
+      initialLineHeightRef.current = lineHeightMultiplier;
       setStatus('Playground draft saved.');
     } catch (_error) {
       setStatus('Failed to save playground settings.');
@@ -313,10 +406,10 @@ export default function Playground() {
 
   async function refreshFontList(): Promise<PlaygroundFontSet[]> {
     const response = await apiClient.getPlaygroundFonts();
-    const normalized = response.data.filter((font) => (
+    const normalized = normalizeFontSets(response.data.filter((font) => (
       String(font.id || '').startsWith('custom:')
       || String(font.id || '').startsWith('font_combo_')
-    ));
+    )));
     setFontSets(normalized);
     return normalized;
   }
@@ -403,6 +496,9 @@ export default function Playground() {
     if (initialStateRef.current) {
       setState(initialStateRef.current);
       setVariantIndex(0);
+      setTitleScale(initialTitleScaleRef.current);
+      setTitlePaddingX(initialTitlePaddingRef.current);
+      setLineHeightMultiplier(initialLineHeightRef.current);
       setScrapedImages([]);
       setScrapedTitle('');
       setScrapeError(null);
@@ -490,8 +586,20 @@ export default function Playground() {
               uploadingTemplate={uploadingTemplate}
               uploadingFont={uploadingFont}
             />
-            <div className="mt-2 text-xs text-slate-500">
-              {isScraping ? 'Scraping selected page...' : scrapeError ? scrapeError : scrapedImages.length > 0 ? `${scrapedImages.length} scraped images ready for preview.` : 'Select a page to scrape images.'}
+            <div
+              className={`mt-3 px-1 text-[11px] ${
+                scrapeError ? 'text-red-600' : 'text-slate-500'
+              }`}
+            >
+              {isScraping
+                ? 'Fetching page images for preview...'
+                : scrapeError
+                  ? scrapeError
+                  : !state.selectedPageUrl
+                    ? 'Select a page to load preview images.'
+                    : scrapedImages.length > 0
+                      ? `Preview images loaded: ${scrapedImages.length}`
+                      : 'No preview images were found for this page.'}
             </div>
           </CardContent>
         </Card>
@@ -524,6 +632,10 @@ export default function Playground() {
         }))}
         titleScale={titleScale}
         onTitleScaleChange={setTitleScale}
+        titlePaddingX={titlePaddingX}
+        onTitlePaddingXChange={setTitlePaddingX}
+        lineHeightMultiplier={lineHeightMultiplier}
+        onLineHeightMultiplierChange={setLineHeightMultiplier}
         metadata={previewMeta}
         loading={previewLoading}
         zoom={state.zoom}
@@ -538,6 +650,7 @@ export default function Playground() {
         scheduledDate={state.scheduledDate}
         onChangeDate={(value) => setState((prev) => ({ ...prev, scheduledDate: value }))}
         activeFontFamily={activeFontFamily}
+        activeFontFile={activeFontSet?.font_file || null}
         pageImages={scrapedImages.length > 0 ? scrapedImages : (selectedPage?.images || [])}
         scrapedTitle={scrapedTitle}
         imageSettings={state.imageSettings}

@@ -39,6 +39,7 @@ const languages = ['English', 'Spanish', 'French', 'German', 'Portuguese', 'Arab
 
 export default function AiSettings({ value, onChange }: AiSettingsProps) {
   const activeStyle = styles.find((style) => style.id === value.promptStyle) || styles[1];
+  const templateTitleMode = value.templateTitleMode || 'original';
 
   return (
     <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm space-y-3">
@@ -96,6 +97,35 @@ export default function AiSettings({ value, onChange }: AiSettingsProps) {
             ))}
           </select>
         </div>
+      </div>
+
+      <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+        <div className="text-xs font-medium text-slate-700">Template Title Source</div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => onChange({ ...value, templateTitleMode: 'original' })}
+            className={`rounded-md border px-3 py-1.5 text-xs transition ${templateTitleMode === 'original' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+          >
+            Use Original Post Title
+          </button>
+          <button
+            onClick={() => onChange({ ...value, templateTitleMode: 'prompt' })}
+            className={`rounded-md border px-3 py-1.5 text-xs transition ${templateTitleMode === 'prompt' ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}
+          >
+            Generate with Prompt
+          </button>
+        </div>
+        {templateTitleMode === 'prompt' && (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-700">Template Title Prompt (supports {'{{title}}'})</label>
+            <Textarea
+              value={value.templateTitlePrompt || ''}
+              onChange={(event) => onChange({ ...value, templateTitlePrompt: event.target.value })}
+              placeholder="Rewrite the Pinterest title based on {{title}}..."
+              className="min-h-[72px] bg-white"
+            />
+          </div>
+        )}
       </div>
     </section>
   );

@@ -20,6 +20,12 @@ from schemas import (
     KeywordEntryUpdate,
 )
 from services.sitemap import clean_url
+from services.trend_ranking import (
+    _build_page_ranking_text,
+    _collect_active_trends,
+    _score_lexical,
+    _tokenize,
+)
 
 router = APIRouter()
 
@@ -413,3 +419,77 @@ def delete_keyword_entry(
 
     db.delete(entry)
     db.commit()
+
+
+@router.get("/trend/match-preview")
+def get_trend_match_preview(
+    website_id: int = Query(..., ge=1),
+    pages_per_keyword: int = Query(default=5, ge=1, le=20),
+    min_score: float = Query(default=0.2, ge=0.0, le=10.0),
+    db: Session = Depends(get_db),
+):
+    """Preview matching enabled pages for each active trend keyword."""
+    website = db.query(Website).filter(Website.id == website_id).first()
+    if not website:
+        raise HTTPException(status_code=404, detail="Website not found")
+
+    pages = (
+        db.query(Page)
+        .filter(Page.website_id == website_id, Page.is_enabled == True)  # noqa: E712
+        .order_by(Page.created_at.desc())
+        .all()
+    )
+    if not pages:
+        return {"website_id": website_id, "items": []}
+
+    seo_rows = db.query(SEOKeyword.url, SEOKeyword.keywords).filter(
+        SEOKeyword.url.in_([page.url for page in pages])
+    ).all()
+    seo_map = {
+        row.url: split_keywords(row.keywords or "")
+        for row in seo_rows
+    }
+
+    trend_rows = (
+        db.query(WebsiteTrendKeyword)
+        .filter(WebsiteTrendKeyword.website_id == website_id)
+        .order_by(WebsiteTrendKeyword.created_at.desc(), WebsiteTrendKeyword.id.desc())
+        .all()
+    )
+    active_trends = _collect_active_trends(trend_rows)
+    if not active_trends:
+        return {"website_id": website_id, "items": []}
+
+    page_vectors = []
+    for page in pages:
+        text = _build_page_ranking_text(page, seo_map.get(page.url, []))
+        page_vectors.append((page, text, _tokenize(text)))
+
+    items: list[dict] = []
+    for trend in active_trends:
+        matched_pages: list[dict] = []
+        for page, text, tokens in page_vectors:
+            score, _ = _score_lexical(text, tokens, [trend])
+            if score < float(min_score):
+                continue
+            matched_pages.append(
+                {
+                    "page_id": page.id,
+                    "url": page.url,
+                    "title": page.title or page.url,
+                    "score": round(float(score), 4),
+                }
+            )
+
+        matched_pages.sort(key=lambda row: (-row["score"], row["url"]))
+        items.append(
+            {
+                "keyword": trend.keyword,
+                "weight": round(float(trend.weight), 4),
+                "matched_count": len(matched_pages),
+                "matched_pages": matched_pages[:pages_per_keyword],
+            }
+        )
+
+    items.sort(key=lambda row: (-row["matched_count"], row["keyword"]))
+    return {"website_id": website_id, "items": items}

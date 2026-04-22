@@ -6,7 +6,7 @@ import type {
 } from '../../services/api';
 
 export type PromptStyle = 'engaging' | 'informative' | 'question' | 'listicle' | 'ecommerce';
-export type ZoomLevel = 1 | 1.5 | 2;
+export type ZoomLevel = 0.6 | 0.8 | 1;
 export type Orientation = 'portrait' | 'square' | 'landscape';
 
 export type AiSettingsState = {
@@ -14,6 +14,8 @@ export type AiSettingsState = {
   customPrompt: string;
   language: string;
   promptEnabled: boolean;
+  templateTitleMode?: 'original' | 'prompt';
+  templateTitlePrompt?: string;
 };
 
 export type ImageSettingsState = {

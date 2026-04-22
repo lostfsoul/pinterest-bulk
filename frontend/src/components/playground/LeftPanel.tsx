@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { FileUp } from 'lucide-react';
 import type { PlaygroundFontSet, PlaygroundPageItem, PlaygroundTemplateItem } from '../../services/api';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -140,22 +141,31 @@ export default function LeftPanel({
         <div className="space-y-3 rounded-md border border-slate-200 p-3">
           <h4 className="text-sm font-semibold text-slate-800">Upload Template / Font</h4>
 
-          <div className="space-y-2 rounded-md border border-slate-200 p-2">
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
             <p className="text-xs font-medium text-slate-600">SVG Template</p>
             <Input
               value={templateName}
               onChange={(event) => setTemplateName(event.target.value)}
               placeholder="Template name"
             />
-            <input
-              type="file"
-              accept=".svg"
-              onChange={(event) => setTemplateFile(event.target.files?.[0] || null)}
-              className="w-full text-xs"
-            />
+            <label className="flex h-12 w-full cursor-pointer items-center justify-between rounded-md border border-dashed border-slate-300 bg-white px-3 text-xs text-slate-600 hover:border-slate-400 hover:bg-slate-50">
+              <span className="truncate">
+                {templateFile ? templateFile.name : 'Choose SVG file (.svg)'}
+              </span>
+              <span className="inline-flex items-center gap-1 text-slate-500">
+                <FileUp className="h-3.5 w-3.5" />
+                Browse
+              </span>
+              <input
+                type="file"
+                accept=".svg"
+                onChange={(event) => setTemplateFile(event.target.files?.[0] || null)}
+                className="hidden"
+              />
+            </label>
             <Button
               size="sm"
-              variant="outline"
+              variant="secondary"
               onClick={() => void handleTemplateUpload()}
               disabled={!templateName.trim() || !templateFile || uploadingTemplate}
             >
@@ -163,22 +173,31 @@ export default function LeftPanel({
             </Button>
           </div>
 
-          <div className="space-y-2 rounded-md border border-slate-200 p-2">
+          <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
             <p className="text-xs font-medium text-slate-600">Custom Font</p>
             <Input
               value={uploadFontFamily}
               onChange={(event) => setUploadFontFamily(event.target.value)}
               placeholder="Font family (optional)"
             />
-            <input
-              type="file"
-              accept=".ttf,.otf,.woff,.woff2"
-              onChange={(event) => setFontFile(event.target.files?.[0] || null)}
-              className="w-full text-xs"
-            />
+            <label className="flex h-12 w-full cursor-pointer items-center justify-between rounded-md border border-dashed border-slate-300 bg-white px-3 text-xs text-slate-600 hover:border-slate-400 hover:bg-slate-50">
+              <span className="truncate">
+                {fontFile ? fontFile.name : 'Choose font file (.ttf, .otf, .woff, .woff2)'}
+              </span>
+              <span className="inline-flex items-center gap-1 text-slate-500">
+                <FileUp className="h-3.5 w-3.5" />
+                Browse
+              </span>
+              <input
+                type="file"
+                accept=".ttf,.otf,.woff,.woff2"
+                onChange={(event) => setFontFile(event.target.files?.[0] || null)}
+                className="hidden"
+              />
+            </label>
             <Button
               size="sm"
-              variant="outline"
+              variant="secondary"
               onClick={() => void handleFontUpload()}
               disabled={!fontFile || uploadingFont}
             >
