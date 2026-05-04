@@ -30,7 +30,6 @@ export default function FontPicker({ fontSets, selectedFontSetId, onSelect }: Fo
           );
         })}
       </div>
-      <button className="text-xs text-blue-600 hover:underline">Or use custom font upload settings</button>
     </div>
   );
 }

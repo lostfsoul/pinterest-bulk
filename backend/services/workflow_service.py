@@ -11,7 +11,18 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from models import CustomFont, GenerationJob, Page, PinDraft, ScheduleSettings, Template, Website
+from models import (
+    CustomFont,
+    GenerationJob,
+    Page,
+    PinDraft,
+    ScheduleSettings,
+    SEOKeyword,
+    Template,
+    Website,
+    WebsiteTrendKeyword,
+)
+from services.trend_ranking import rank_pages_for_trends
 
 
 DEFAULT_WINDOW_DAYS = 33
@@ -199,6 +210,21 @@ def _enabled_page_ids(db: Session, website_id: int) -> list[int]:
         .all()
     )
     return [row[0] for row in rows]
+
+
+def _split_keyword_csv(value: str | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in (value or "").split(","):
+        keyword = item.strip()
+        if not keyword:
+            continue
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(keyword)
+    return result
 
 
 def _clamp_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
@@ -453,6 +479,125 @@ def build_daily_slots_for_day(
     return sorted(slots)
 
 
+def build_workflow_publish_slots(
+    *,
+    website: Website,
+    config: dict[str, Any],
+    now: datetime | None = None,
+) -> list[datetime]:
+    """Build future publish slots for the configured scheduling window."""
+    current = now or datetime.utcnow()
+    window_days = _clamp_int(config.get("scheduling_window_days"), DEFAULT_WINDOW_DAYS, 2, 60)
+    start_day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    slots: list[datetime] = []
+    for day_index in range(window_days):
+        day_start = start_day + timedelta(days=day_index)
+        for slot in build_daily_slots_for_day(
+            website=website,
+            config=config,
+            day_start=day_start,
+            day_index=day_index,
+        ):
+            if slot > current:
+                slots.append(slot)
+    return sorted(slots)
+
+
+def _scheduled_count_in_window(
+    db: Session,
+    *,
+    website_id: int,
+    window_start: datetime,
+    window_end: datetime,
+) -> int:
+    return (
+        db.query(PinDraft.id)
+        .join(Page, Page.id == PinDraft.page_id)
+        .filter(
+            Page.website_id == website_id,
+            PinDraft.publish_date.is_not(None),
+            PinDraft.publish_date >= window_start,
+            PinDraft.publish_date <= window_end,
+        )
+        .count()
+    )
+
+
+def _is_page_blocked_by_content_limits(db: Session, page: Page, content: dict[str, Any]) -> bool:
+    existing = (
+        db.query(PinDraft)
+        .filter(PinDraft.page_id == page.id)
+        .order_by(PinDraft.created_at.desc())
+        .all()
+    )
+    desired_gap_days = _clamp_int(content.get("desired_gap_days"), 0, 0, 365)
+    if desired_gap_days > 0 and existing:
+        if (datetime.utcnow() - existing[0].created_at).days < desired_gap_days:
+            return True
+
+    lifetime_limit_enabled = bool(content.get("lifetime_limit_enabled", False))
+    lifetime_limit_count = _clamp_int(content.get("lifetime_limit_count"), 0, 0, 100000)
+    if lifetime_limit_enabled and lifetime_limit_count > 0 and len(existing) >= lifetime_limit_count:
+        return True
+
+    monthly_limit_enabled = bool(content.get("monthly_limit_enabled", False))
+    monthly_limit_count = _clamp_int(content.get("monthly_limit_count"), 0, 0, 100000)
+    if monthly_limit_enabled and monthly_limit_count > 0:
+        month_ago = datetime.utcnow() - timedelta(days=30)
+        if sum(1 for pin in existing if pin.created_at >= month_ago) >= monthly_limit_count:
+            return True
+
+    return False
+
+
+def _rank_enabled_pages_for_workflow(db: Session, website: Website, pages: list[Page]) -> list[Page]:
+    if not pages:
+        return []
+
+    keyword_rows = db.query(SEOKeyword).filter(SEOKeyword.url.in_([page.url for page in pages])).all()
+    seo_keywords_by_url = {
+        row.url: _split_keyword_csv(row.keywords)
+        for row in keyword_rows
+    }
+    trend_rows = db.query(WebsiteTrendKeyword).filter(WebsiteTrendKeyword.website_id == website.id).all()
+    ranked_pages, _ = rank_pages_for_trends(
+        pages,
+        trend_keywords_by_website={website.id: trend_rows},
+        generation_settings_by_website={website.id: website.generation_settings or {}},
+        seo_keywords_by_url=seo_keywords_by_url,
+        top_n_override=len(pages),
+    )
+    return ranked_pages
+
+
+def select_workflow_page_ids(
+    db: Session,
+    *,
+    website: Website,
+    target_count: int,
+) -> list[int]:
+    if target_count <= 0:
+        return []
+
+    pages = (
+        db.query(Page)
+        .filter(Page.website_id == website.id, Page.is_enabled == True)  # noqa: E712
+        .order_by(Page.created_at.desc())
+        .all()
+    )
+    ranked_pages = _rank_enabled_pages_for_workflow(db, website, pages)
+    content = _get_content_settings(website)
+
+    selected: list[int] = []
+    for page in ranked_pages:
+        if _is_page_blocked_by_content_limits(db, page, content):
+            continue
+        selected.append(page.id)
+        if len(selected) >= target_count:
+            break
+    return selected
+
+
 def has_active_generation_job(db: Session, website_id: int) -> bool:
     expire_stale_generation_jobs(db, website_id)
     return (
@@ -496,16 +641,59 @@ def build_generation_payload(db: Session, website: Website) -> dict[str, Any]:
     if not template_id:
         raise ValueError("No template selected in Playground settings.")
 
-    page_ids = _enabled_page_ids(db, website.id)
-    if not page_ids:
+    enabled_page_ids = _enabled_page_ids(db, website.id)
+    if not enabled_page_ids:
         raise ValueError("No enabled pages available for this website.")
 
     generation = _get_generation_settings(website)
     ai = _get_ai_settings(website)
     trend = _get_trend_settings(website)
+    config = resolve_website_schedule_config(db, website)
+    publish_slots = build_workflow_publish_slots(website=website, config=config)
+    if not publish_slots:
+        return {
+            "website_id": website.id,
+            "template_id": template_id,
+            "page_ids": [],
+            "target_pin_count": 0,
+            "planned_publish_slots": [],
+            "no_generation_reason": "No future publishing slots are available in the configured scheduling window.",
+            "pins_per_day": int(config.get("pins_per_day", DEFAULT_PINS_PER_DAY)),
+            "window_days": int(config.get("scheduling_window_days", DEFAULT_WINDOW_DAYS)),
+        }
+
+    window_start = datetime.utcnow()
+    window_end = publish_slots[-1]
+    scheduled_count = _scheduled_count_in_window(
+        db,
+        website_id=website.id,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    target_pin_count = max(0, len(publish_slots) - scheduled_count)
+    if target_pin_count <= 0:
+        return {
+            "website_id": website.id,
+            "template_id": template_id,
+            "page_ids": [],
+            "target_pin_count": 0,
+            "planned_publish_slots": [],
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "existing_scheduled_count": scheduled_count,
+            "target_slot_count": len(publish_slots),
+            "no_generation_reason": "Schedule already filled for the configured window.",
+            "pins_per_day": int(config.get("pins_per_day", DEFAULT_PINS_PER_DAY)),
+            "window_days": int(config.get("scheduling_window_days", DEFAULT_WINDOW_DAYS)),
+        }
+
+    page_ids = select_workflow_page_ids(db, website=website, target_count=target_pin_count)
+    if not page_ids:
+        raise ValueError("No eligible pages available for the configured workflow limits.")
 
     variants = max(1, int(generation.get("text_variations") or ai.get("variants") or 1))
     mode = "matrix" if variants > 1 else "conservative"
+    planned_slots = publish_slots[scheduled_count : scheduled_count + len(page_ids)]
 
     payload: dict[str, Any] = {
         "website_id": website.id,
@@ -528,6 +716,14 @@ def build_generation_payload(db: Session, website: Website) -> dict[str, Any]:
         "diversity_enabled": bool(trend.get("diversity_enabled")) if trend.get("diversity_enabled") is not None else None,
         "diversity_penalty": float(trend["diversity_penalty"]) if trend.get("diversity_penalty") not in (None, "") else None,
         "semantic_enabled": bool(trend.get("semantic_enabled")) if trend.get("semantic_enabled") is not None else None,
+        "target_pin_count": target_pin_count,
+        "target_slot_count": len(publish_slots),
+        "existing_scheduled_count": scheduled_count,
+        "planned_publish_slots": [slot.isoformat() for slot in planned_slots],
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "pins_per_day": int(config.get("pins_per_day", DEFAULT_PINS_PER_DAY)),
+        "window_days": int(config.get("scheduling_window_days", DEFAULT_WINDOW_DAYS)),
     }
     playground_render_settings = _resolve_playground_render_settings(db, website)
     if playground_render_settings:
@@ -539,13 +735,16 @@ def build_generation_payload(db: Session, website: Website) -> dict[str, Any]:
 
 
 def create_generation_job(db: Session, website_id: int, payload: dict[str, Any], reason: str) -> GenerationJob:
+    target_count = int(payload.get("target_pin_count") or len(payload.get("page_ids") or []) or 0)
     job = GenerationJob(
         website_id=website_id,
         template_id=payload.get("template_id"),
         status="queued",
         phase="queued",
-        message=f"Queued generation job ({reason})",
+        message=f"Queued generation for {target_count} pin(s) ({reason})",
         request_payload=payload,
+        total_pages=len(payload.get("page_ids") or []),
+        total_pins=target_count,
     )
     db.add(job)
     db.commit()

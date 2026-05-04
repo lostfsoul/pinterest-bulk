@@ -2,6 +2,7 @@ import type { PlaygroundPreviewMeta } from '../../services/api';
 
 type PinMetadataProps = {
   metadata: PlaygroundPreviewMeta | null;
+  images: string[];
   scheduledDate: string | null;
   onChangeDate: (value: string | null) => void;
 };
@@ -17,8 +18,9 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-export default function PinMetadata({ metadata, scheduledDate, onChangeDate }: PinMetadataProps) {
+export default function PinMetadata({ metadata, images, scheduledDate, onChangeDate }: PinMetadataProps) {
   void onChangeDate;
+  const visibleImages = images.length > 0 ? images : (metadata?.image_url ? [metadata.image_url] : []);
   return (
     <div className="space-y-3">
       <Row label="Pinterest Title" value={metadata?.title || ''} />
@@ -30,13 +32,19 @@ export default function PinMetadata({ metadata, scheduledDate, onChangeDate }: P
       <Row label="Date To Publish" value={scheduledDate || 'Not scheduled'} />
       <div className="space-y-1.5">
         <div className="text-xs font-medium text-slate-600">Images</div>
-        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-800">
-          {metadata?.image_url ? (
-            <img src={metadata.image_url} alt="" className="h-12 w-12 rounded border border-slate-200 object-cover" />
+        <div className="rounded-md border border-slate-200 bg-slate-50 p-2">
+          {visibleImages.length > 0 ? (
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">
+              {visibleImages.map((image, index) => (
+                <div key={`${image}-${index}`} className="space-y-1">
+                  <img src={image} alt="" className="h-16 w-full rounded border border-slate-200 bg-white object-cover" />
+                  <div className="truncate text-[10px] text-slate-500">Image {index + 1}</div>
+                </div>
+              ))}
+            </div>
           ) : (
-            <div className="h-12 w-12 rounded border border-slate-200 bg-white" />
+            <div className="text-xs text-slate-500">No images found for selected page.</div>
           )}
-          <span>Cover · Center Center</span>
         </div>
       </div>
     </div>

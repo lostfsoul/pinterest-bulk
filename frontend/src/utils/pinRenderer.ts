@@ -243,32 +243,8 @@ function removePlaceholderElements(doc: Document, textZoneY: number, textZoneH: 
     const ty = extractTranslateY(child.getAttribute('transform'));
     if (ty !== null && ty >= top && ty <= bottom) group.remove();
   });
-}
-
-function extractTextElements(doc: Document, textZoneY: number, textZoneH: number): SvgTextElement[] {
-  const top = textZoneY - 15;
-  const bottom = textZoneY + textZoneH + 15;
-  const items: SvgTextElement[] = [];
-  Array.from(doc.querySelectorAll('text')).forEach((node) => {
-    const x = readNum(node.getAttribute('x'), 0);
-    const y = readNum(node.getAttribute('y'), 0);
-    if (y >= top && y <= bottom) return;
-    const value = (node.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!value) return;
-    const textAnchorRaw = (node.getAttribute('text-anchor') || 'start').toLowerCase();
-    const textAnchor: CanvasTextAlign = textAnchorRaw === 'middle' ? 'center' : textAnchorRaw === 'end' ? 'right' : 'left';
-    items.push({
-      text: value,
-      x,
-      y,
-      fill: node.getAttribute('fill') || '#000000',
-      fontFamily: node.getAttribute('font-family') || 'Poppins',
-      fontSize: readNum(node.getAttribute('font-size'), 16),
-      fontWeight: node.getAttribute('font-weight') || '400',
-      textAnchor,
-    });
-  });
-  return items;
+  // Strip all textual placeholders from templates so only generated title is rendered.
+  Array.from(doc.querySelectorAll('text, tspan')).forEach((node) => node.remove());
 }
 
 export function parseSVG(svgText: string): ParsedSvgData {
@@ -284,7 +260,8 @@ export function parseSVG(svgText: string): ParsedSvgData {
   const zones = detectImageZones(doc, cpMap);
   const { textZoneX, textZoneW, textZoneY, textZoneH } = detectTextZone(canvasW, canvasH, zones, cpMap);
   const textZoneTextColor = detectTextZoneTextColor(doc, textZoneY, textZoneH);
-  const textElements = extractTextElements(doc, textZoneY, textZoneH);
+  // Do not preserve authored SVG text layers in client preview to avoid duplicate titles.
+  const textElements: SvgTextElement[] = [];
   const { color: textZoneBorderColor, width: textZoneBorderWidth } = detectTextZoneBorder(doc, cpMap, textZoneY, textZoneH);
 
   const stripDoc = parser.parseFromString(svgText, 'image/svg+xml');

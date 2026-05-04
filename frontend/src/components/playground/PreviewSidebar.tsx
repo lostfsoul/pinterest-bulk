@@ -12,14 +12,13 @@ type PreviewSidebarProps = {
   selectedTemplateIds: number[];
   activeTemplateId: number | null;
   onSelectTemplate: (id: number) => void;
+  onToggleTemplateSelection: (id: number) => void;
   defaultTemplateId: number | null;
   onSetDefaultTemplate: (id: number) => void;
   titleScale: number;
-  onTitleScaleChange: (value: number) => void;
   titlePaddingX: number;
-  onTitlePaddingXChange: (value: number) => void;
   lineHeightMultiplier: number;
-  onLineHeightMultiplierChange: (value: number) => void;
+  onResetTextSettings?: () => void;
 };
 
 function TemplateMiniCard({
@@ -52,16 +51,15 @@ export default function PreviewSidebar({
   selectedTemplateIds,
   activeTemplateId,
   onSelectTemplate,
+  onToggleTemplateSelection,
   defaultTemplateId,
   onSetDefaultTemplate,
   titleScale,
-  onTitleScaleChange,
   titlePaddingX,
-  onTitlePaddingXChange,
   lineHeightMultiplier,
-  onLineHeightMultiplierChange,
+  onResetTextSettings,
 }: PreviewSidebarProps) {
-  const quickTemplates = templates.filter((template) => selectedTemplateIds.includes(template.id));
+  const quickTemplates = templates;
   const quickColors = ['#111827', '#1f2937', '#0f766e', '#0369a1', '#be123c', '#f97316', '#7c3aed', '#ffffff'];
 
   const normalizeHex = (value: string): string => {
@@ -133,7 +131,7 @@ export default function PreviewSidebar({
       <div className="space-y-1.5">
         <div className="flex items-center justify-between">
           <div className="text-xs font-semibold text-slate-700">Templates</div>
-          <Badge variant="secondary" className="text-[10px]">{quickTemplates.length}</Badge>
+          <Badge variant="secondary" className="text-[10px]">{selectedTemplateIds.length} selected</Badge>
         </div>
         <div className="grid max-h-[320px] grid-cols-2 gap-2 overflow-y-auto pr-1">
           {quickTemplates.map((template) => (
@@ -143,6 +141,16 @@ export default function PreviewSidebar({
                 active={activeTemplateId === template.id}
                 onClick={() => onSelectTemplate(template.id)}
               />
+              <button
+                onClick={() => onToggleTemplateSelection(template.id)}
+                className={`w-full rounded border px-1 py-1 text-[10px] ${
+                  selectedTemplateIds.includes(template.id)
+                    ? 'border-emerald-600 bg-emerald-600 text-white'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                {selectedTemplateIds.includes(template.id) ? 'Selected' : 'Select'}
+              </button>
               <button
                 onClick={() => onSetDefaultTemplate(template.id)}
                 className={`w-full rounded border px-1 py-1 text-[10px] ${defaultTemplateId === template.id ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}
@@ -154,46 +162,23 @@ export default function PreviewSidebar({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <div className="text-xs font-semibold text-slate-700">Title Size</div>
-        <input
-          type="range"
-          min={0.7}
-          max={1.6}
-          step={0.05}
-          value={titleScale}
-          onChange={(event) => onTitleScaleChange(Number(event.target.value))}
-          className="w-full"
-        />
-        <div className="text-[10px] text-slate-500">{Math.round(titleScale * 100)}%</div>
-      </div>
-
-      <div className="space-y-1.5">
-        <div className="text-xs font-semibold text-slate-700">Title Side Padding</div>
-        <input
-          type="range"
-          min={8}
-          max={36}
-          step={1}
-          value={titlePaddingX}
-          onChange={(event) => onTitlePaddingXChange(Number(event.target.value))}
-          className="w-full"
-        />
-        <div className="text-[10px] text-slate-500">{Math.round(titlePaddingX)}px</div>
-      </div>
-
-      <div className="space-y-1.5">
-        <div className="text-xs font-semibold text-slate-700">Line Spacing</div>
-        <input
-          type="range"
-          min={0.8}
-          max={1.35}
-          step={0.05}
-          value={lineHeightMultiplier}
-          onChange={(event) => onLineHeightMultiplierChange(Number(event.target.value))}
-          className="w-full"
-        />
-        <div className="text-[10px] text-slate-500">{lineHeightMultiplier.toFixed(2)}x</div>
+      <div className="space-y-1.5 rounded-md border border-slate-200 bg-slate-50 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-semibold text-slate-700">Title Controls</div>
+          {onResetTextSettings && (
+            <button
+              type="button"
+              onClick={onResetTextSettings}
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-100"
+            >
+              Reset
+            </button>
+          )}
+        </div>
+        <div className="text-[11px] text-slate-600">Drag the labels on the canvas: Size / Padding / Spacing.</div>
+        <div className="text-[10px] text-slate-500">
+          {Math.round(titleScale * 100)}% · {Math.round(titlePaddingX)}px · {lineHeightMultiplier.toFixed(2)}x
+        </div>
       </div>
     </div>
   );

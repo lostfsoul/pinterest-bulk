@@ -50,7 +50,12 @@ export default function Websites() {
       if (editingWebsiteId) {
         await apiClient.updateWebsite(editingWebsiteId, formData);
       } else {
-        await apiClient.createWebsite(formData);
+        const response = await apiClient.createWebsite(formData);
+        const websiteId = response.data.id;
+        localStorage.setItem('active_website_id', String(websiteId));
+        window.dispatchEvent(new CustomEvent<number>('website-switch', { detail: websiteId }));
+        window.dispatchEvent(new CustomEvent<number>('website-refresh', { detail: websiteId }));
+        window.dispatchEvent(new CustomEvent<number>('open-onboarding', { detail: websiteId }));
       }
       closeWizard();
       await loadWebsites();

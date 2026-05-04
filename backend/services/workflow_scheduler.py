@@ -30,6 +30,8 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
                     if not should_auto_generate(status):
                         continue
                     payload = build_generation_payload(db, website)
+                    if payload.get("no_generation_reason"):
+                        continue
                     job = create_generation_job(db, website.id, payload, reason="auto_scheduler")
                     asyncio.create_task(asyncio.to_thread(run_generation_job, job.id))
                 except Exception:

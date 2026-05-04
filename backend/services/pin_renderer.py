@@ -871,10 +871,14 @@ def _draw_fitted_text_block_with_pillow(
             )
 
     metrics = draw.textbbox((0, 0), "Ag", font=font)
+    glyph_top = metrics[1]
     cap_height = (metrics[3] - metrics[1]) or font_size
     line_height = max(1, int(round(font_size * line_height_multiplier)))
     visual_height = cap_height + (len(lines) - 1) * line_height
-    first_y = y + (height - visual_height) / 2
+    # Pillow positions text from its font origin, while the visible glyph box can
+    # start lower than that origin. Offset by bbox top so visual centering matches
+    # the frontend canvas preview and does not drift downward for tall fonts.
+    first_y = y + (height - visual_height) / 2 - glyph_top
     center_x = x + (width / 2)
     left_x = x + title_padding_x
     right_x = x + width - title_padding_x

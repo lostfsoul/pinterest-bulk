@@ -3,6 +3,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import './index.css';
 import apiClient, { GenerationJob, Website } from './services/api';
 import { Button } from './components/Button';
+import OnboardingModal, { shouldShowOnboarding } from './components/OnboardingModal';
 import {
   CalendarDays,
   FileOutput,
@@ -89,12 +90,14 @@ function Layout({
     const stored = localStorage.getItem('dismissed_generation_job_id');
     return stored ? Number(stored) : null;
   });
+  const [onboardingWebsiteId, setOnboardingWebsiteId] = useState<number | null>(null);
 
-  useEffect(() => {
+  async function loadWebsitesForLayout(preferredWebsiteId?: number | null) {
     const stored = localStorage.getItem('active_website_id');
-    const storedId = stored ? Number(stored) : null;
+    const storedId = preferredWebsiteId ?? (stored ? Number(stored) : null);
     if (storedId) setActiveWebsiteId(storedId);
-    void apiClient.listWebsites().then((response) => {
+    try {
+      const response = await apiClient.listWebsites();
       setWebsites(response.data);
       if (response.data.length > 0) {
         const id =
@@ -103,9 +106,13 @@ function Layout({
         setActiveWebsiteId(id);
         localStorage.setItem('active_website_id', String(id));
       }
-    }).catch((error) => {
+    } catch (error) {
       console.error('Failed to load websites in layout:', error);
-    });
+    }
+  }
+
+  useEffect(() => {
+    void loadWebsitesForLayout();
   }, []);
 
   useEffect(() => {
@@ -115,6 +122,25 @@ function Layout({
     };
     window.addEventListener('website-switch', onWebsiteSwitch as EventListener);
     return () => window.removeEventListener('website-switch', onWebsiteSwitch as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const onWebsiteRefresh = (event: Event) => {
+      const custom = event as CustomEvent<number | null>;
+      void loadWebsitesForLayout(custom.detail ?? null);
+    };
+    window.addEventListener('website-refresh', onWebsiteRefresh as EventListener);
+    return () => window.removeEventListener('website-refresh', onWebsiteRefresh as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const onOpenOnboarding = (event: Event) => {
+      const custom = event as CustomEvent<number>;
+      if (!custom.detail) return;
+      setOnboardingWebsiteId(custom.detail);
+    };
+    window.addEventListener('open-onboarding', onOpenOnboarding as EventListener);
+    return () => window.removeEventListener('open-onboarding', onOpenOnboarding as EventListener);
   }, []);
 
   useEffect(() => {
@@ -222,6 +248,9 @@ function Layout({
       activeGenerationJob.id !== dismissedGenerationJobId,
   );
   const activeWebsite = websites.find((website) => website.id === activeWebsiteId) ?? null;
+  const onboardingWebsite = websites.find((website) => website.id === onboardingWebsiteId) ?? null;
+  const activeWebsiteNeedsOnboarding = shouldShowOnboarding(activeWebsite);
+  const showOnboardingReminder = Boolean(activeWebsiteNeedsOnboarding && !onboardingWebsite);
   const activeWebsiteLabel = activeWebsite?.name || 'No active website';
   const activeWebsiteDomain = activeWebsite?.url
     ? activeWebsite.url.replace(/^https?:\/\//, '').replace(/\/$/, '')
@@ -233,10 +262,22 @@ function Layout({
       ? 'Generation Complete'
       : activeGenerationJob?.status === 'failed'
         ? 'Generation Failed'
-        : 'Generation Running';
+      : 'Generation Running';
 
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900">
+      <OnboardingModal
+        open={Boolean(onboardingWebsite)}
+        website={onboardingWebsite}
+        onOpenChange={(open) => {
+          if (open || !onboardingWebsiteId) return;
+          setOnboardingWebsiteId(null);
+        }}
+        onCompleted={() => {
+          setOnboardingWebsiteId(null);
+          void loadWebsitesForLayout(activeWebsiteId || null);
+        }}
+      />
       {/* Mobile Header */}
       <div className="lg:hidden fixed top-0 left-0 right-0 h-16 bg-white border-b border-slate-200 z-40 flex items-center justify-between px-4">
         <button
@@ -421,6 +462,23 @@ function Layout({
                   Dismiss
                 </Button>
               </div>
+            </div>
+          </div>
+        )}
+        {showOnboardingReminder && activeWebsite && (
+          <div className="sticky top-0 lg:top-16 z-10 border-b border-pink-200 bg-pink-50 px-4 py-3 lg:px-6">
+            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div className="text-xs font-black uppercase tracking-wide text-pink-700">
+                  First setup required
+                </div>
+                <div className="mt-1 text-sm font-medium text-slate-900">
+                  Finish first setup for {activeWebsite.name} before using the normal generation flow.
+                </div>
+              </div>
+              <Button size="sm" onClick={() => setOnboardingWebsiteId(activeWebsite.id)}>
+                Continue Setup
+              </Button>
             </div>
           </div>
         )}

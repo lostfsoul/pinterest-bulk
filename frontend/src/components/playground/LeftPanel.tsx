@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { FileUp } from 'lucide-react';
-import type { PlaygroundFontSet, PlaygroundPageItem, PlaygroundTemplateItem } from '../../services/api';
+import type { PlaygroundFontSet, PlaygroundPageItem } from '../../services/api';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import type {
@@ -13,7 +13,6 @@ import AiSettings from './AiSettings';
 import FontPicker from './FontPicker';
 import ImageSettings from './ImageSettings';
 import SelectPage from './SelectPage';
-import TemplateGrid from './TemplateGrid';
 
 type LeftPanelProps = {
   pages: PlaygroundPageItem[];
@@ -24,23 +23,14 @@ type LeftPanelProps = {
   fontSets: PlaygroundFontSet[];
   selectedFontSetId: string;
   onSelectFontSet: (id: string) => void;
-  templates: PlaygroundTemplateItem[];
-  selectedTemplateIds: number[];
-  activeTemplateId: number | null;
   selectedPage: PlaygroundPageItem | null;
-  fontFamily: string;
-  fontColor: string;
-  onSelectTemplates: (ids: number[]) => void;
-  onTemplateOpen: (templateId: number) => void;
   imageSettings: ImageSettingsState;
   displaySettings: DisplaySettingsState;
   advancedSettings: AdvancedSettingsState;
   onImageSettingsChange: (next: ImageSettingsState) => void;
   onDisplaySettingsChange: (next: DisplaySettingsState) => void;
   onAdvancedSettingsChange: (next: AdvancedSettingsState) => void;
-  onDeleteTemplate: (templateId: number) => void;
-  onRemoveImages: () => void;
-  onScrapeResult: (payload: { images: string[]; title: string; description: string }) => void;
+  onScrapeResult: (payload: { pageUrl: string; images: string[]; title: string; description: string }) => void;
   onSaveDraft: () => void;
   saving: boolean;
   onUploadTemplate: (name: string, file: File) => Promise<void>;
@@ -58,22 +48,13 @@ export default function LeftPanel({
   fontSets,
   selectedFontSetId,
   onSelectFontSet,
-  templates,
-  selectedTemplateIds,
-  activeTemplateId,
   selectedPage,
-  fontFamily,
-  fontColor,
-  onSelectTemplates,
-  onTemplateOpen,
   imageSettings,
   displaySettings,
   advancedSettings,
   onImageSettingsChange,
   onDisplaySettingsChange,
   onAdvancedSettingsChange,
-  onDeleteTemplate,
-  onRemoveImages,
   onScrapeResult,
   onSaveDraft,
   saving,
@@ -107,7 +88,6 @@ export default function LeftPanel({
         pages={pages}
         selectedPageUrl={selectedPageUrl}
         onSelectPage={onSelectPage}
-        onRemoveImages={onRemoveImages}
         onScrapeResult={onScrapeResult}
       />
 
@@ -123,19 +103,6 @@ export default function LeftPanel({
           fontSets={fontSets}
           selectedFontSetId={selectedFontSetId}
           onSelect={onSelectFontSet}
-        />
-
-        <TemplateGrid
-          templates={templates}
-          selectedTemplateIds={selectedTemplateIds}
-          selectedPage={selectedPage}
-          activeTemplateId={activeTemplateId}
-          fontFamily={fontFamily}
-          fontColor={fontColor}
-          imageSettings={imageSettings}
-          onSelectTemplates={onSelectTemplates}
-          onTemplateOpen={onTemplateOpen}
-          onDeleteTemplate={onDeleteTemplate}
         />
 
         <div className="space-y-3 rounded-md border border-slate-200 p-3">

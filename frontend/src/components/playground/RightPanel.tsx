@@ -26,6 +26,7 @@ type RightPanelProps = {
   onTitlePaddingXChange: (value: number) => void;
   lineHeightMultiplier: number;
   onLineHeightMultiplierChange: (value: number) => void;
+  onResetTextSettings: () => void;
   metadata: PlaygroundPreviewMeta | null;
   loading: boolean;
   zoom: ZoomLevel;
@@ -37,6 +38,7 @@ type RightPanelProps = {
   onRandomize: () => void;
   onClearChanges: () => void;
   onSelectTemplate: (id: number) => void;
+  onToggleTemplateSelection: (id: number) => void;
   scheduledDate: string | null;
   onChangeDate: (value: string | null) => void;
   activeFontFamily: string;
@@ -68,6 +70,7 @@ export default function RightPanel({
   onTitlePaddingXChange,
   lineHeightMultiplier,
   onLineHeightMultiplierChange,
+  onResetTextSettings,
   metadata,
   loading,
   zoom,
@@ -79,6 +82,7 @@ export default function RightPanel({
   onRandomize,
   onClearChanges,
   onSelectTemplate,
+  onToggleTemplateSelection,
   scheduledDate,
   onChangeDate,
   activeFontFamily,
@@ -103,7 +107,7 @@ export default function RightPanel({
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="outline" size="sm" onClick={onRandomize}>
                 <Shuffle className="h-4 w-4" />
-                Randomize
+                Randomize Images
               </Button>
               <Button
                 size="sm"
@@ -152,6 +156,10 @@ export default function RightPanel({
                       titleScale={titleScale}
                       titlePaddingX={titlePaddingX}
                       lineHeightMultiplier={lineHeightMultiplier}
+                      onTitleScaleChange={onTitleScaleChange}
+                      onTitlePaddingXChange={onTitlePaddingXChange}
+                      onLineHeightMultiplierChange={onLineHeightMultiplierChange}
+                      showDragControls
                       imageSettings={imageSettings}
                       zoom={zoom}
                       className="w-full"
@@ -177,20 +185,24 @@ export default function RightPanel({
                 selectedTemplateIds={selectedTemplateIds}
                 activeTemplateId={activeTemplate?.id ?? null}
                 onSelectTemplate={onSelectTemplate}
+                onToggleTemplateSelection={onToggleTemplateSelection}
                 defaultTemplateId={defaultTemplateId}
                 onSetDefaultTemplate={onSetDefaultTemplate}
                 titleScale={titleScale}
-                onTitleScaleChange={onTitleScaleChange}
                 titlePaddingX={titlePaddingX}
-                onTitlePaddingXChange={onTitlePaddingXChange}
                 lineHeightMultiplier={lineHeightMultiplier}
-                onLineHeightMultiplierChange={onLineHeightMultiplierChange}
+                onResetTextSettings={onResetTextSettings}
               />
             </div>
           </div>
 
           {loading && <div className="text-xs text-slate-500">Loading preview metadata...</div>}
-          <PinMetadata metadata={metadata} scheduledDate={scheduledDate} onChangeDate={onChangeDate} />
+          <PinMetadata
+            metadata={metadata}
+            images={rendererImages}
+            scheduledDate={scheduledDate}
+            onChangeDate={onChangeDate}
+          />
         </div>
       </aside>
     </div>

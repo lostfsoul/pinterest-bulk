@@ -586,6 +586,23 @@ def run_generation_job(job_id: int) -> None:
             progress_callback=progress,
         )
 
+        page_order = {
+            int(page_id): index
+            for index, page_id in enumerate(payload.get("page_ids") or [])
+        }
+        pins.sort(key=lambda pin: page_order.get(int(pin.page_id or 0), len(page_order)))
+        planned_publish_slots: list[datetime] = []
+        for raw_slot in payload.get("planned_publish_slots") or []:
+            try:
+                planned_publish_slots.append(datetime.fromisoformat(str(raw_slot)))
+            except (TypeError, ValueError):
+                continue
+        for pin, publish_slot in zip(pins, planned_publish_slots):
+            pin.publish_date = publish_slot
+            pin.updated_at = datetime.utcnow()
+        if planned_publish_slots:
+            db.commit()
+
         pin_ids = [pin.id for pin in pins]
         _update_generation_job(
             db,

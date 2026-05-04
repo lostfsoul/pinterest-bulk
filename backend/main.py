@@ -3,6 +3,7 @@ Main FastAPI application.
 """
 import asyncio
 import os
+from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -11,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from database import engine, get_db, init_db, SessionLocal
-from models import ScheduleSettings
+from models import GenerationJob, ScheduleSettings
 from services.auth import is_request_authenticated
 from services.workflow_scheduler import run_workflow_scheduler
 
@@ -41,6 +42,34 @@ def load_local_env() -> None:
 load_local_env()
 
 
+def mark_interrupted_generation_jobs_failed(db: Session) -> int:
+    """Mark active jobs as failed after a server restart.
+
+    In-process generation jobs cannot continue after the backend exits, but the
+    browser may keep polling their job IDs from localStorage. Making them
+    terminal on startup lets the UI clear stale polling immediately.
+    """
+    active_jobs = (
+        db.query(GenerationJob)
+        .filter(GenerationJob.status.in_(["queued", "running"]))
+        .all()
+    )
+    if not active_jobs:
+        return 0
+
+    now = datetime.utcnow()
+    for job in active_jobs:
+        job.status = "failed"
+        job.phase = "error"
+        job.message = "Generation job interrupted by server restart."
+        job.error_detail = "Generation job interrupted by server restart."
+        job.completed_at = now
+        job.updated_at = now
+
+    db.commit()
+    return len(active_jobs)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup."""
@@ -53,6 +82,7 @@ async def lifespan(app: FastAPI):
             settings = ScheduleSettings()
             db.add(settings)
             db.commit()
+        mark_interrupted_generation_jobs_failed(db)
     finally:
         db.close()
 

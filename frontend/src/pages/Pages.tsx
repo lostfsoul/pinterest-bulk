@@ -5,43 +5,12 @@ import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
-
-type GroupMode = 'prefix' | 'sitemap' | 'categories';
-type SelectionFilter = 'all' | 'enabled' | 'disabled';
-
-function derivePagePrefix(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const pathParts = parsed.pathname.split('/').filter(Boolean);
-    if (pathParts.length === 0) return `${parsed.origin}/`;
-    return `${parsed.origin}/${pathParts[0]}/`;
-  } catch {
-    return '/';
-  }
-}
-
-function deriveCategory(page: ImagePageSummary): string {
-  const pathParts = page.url
-    .split('/')
-    .filter(Boolean)
-    .slice(2)
-    .map((part) => part.toLowerCase());
-  const firstSlug = pathParts[0] || '';
-  const slugAsLabel = firstSlug.replace(/[-_]+/g, ' ').trim();
-  if (page.sitemap_bucket === 'category' && slugAsLabel) return slugAsLabel;
-  if (slugAsLabel) return slugAsLabel;
-  return (page.section || 'uncategorized').toLowerCase();
-}
-
-function deriveSitemapLabel(source: string): string {
-  try {
-    const parsed = new URL(source);
-    const filename = parsed.pathname.split('/').filter(Boolean).pop();
-    return filename || source;
-  } catch {
-    return source;
-  }
-}
+import {
+  filterPages,
+  groupPages,
+  type PageGroupingMode,
+  type PageSelectionFilter,
+} from '../utils/pageGrouping';
 
 export default function Pages() {
   const [websites, setWebsites] = useState<Website[]>([]);
@@ -51,8 +20,8 @@ export default function Pages() {
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [query, setQuery] = useState('');
-  const [groupMode, setGroupMode] = useState<GroupMode>('prefix');
-  const [selectionFilter, setSelectionFilter] = useState<SelectionFilter>('all');
+  const [groupMode, setGroupMode] = useState<PageGroupingMode>('prefix');
+  const [selectionFilter, setSelectionFilter] = useState<PageSelectionFilter>('all');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [status, setStatus] = useState('');
 
@@ -155,37 +124,11 @@ export default function Pages() {
   }
 
   const filtered = useMemo(() => {
-    const term = query.trim().toLowerCase();
-    return pages.filter((page) => {
-      if (selectionFilter === 'enabled' && !page.is_enabled) return false;
-      if (selectionFilter === 'disabled' && page.is_enabled) return false;
-      if (!term) return true;
-      return page.url.toLowerCase().includes(term) || (page.title || '').toLowerCase().includes(term);
-    });
+    return filterPages(pages, query, selectionFilter);
   }, [pages, query, selectionFilter]);
 
   const groups = useMemo(() => {
-    const map = new Map<string, { label: string; pages: ImagePageSummary[] }>();
-    for (const page of filtered) {
-      let key = '';
-      let label = '';
-      if (groupMode === 'prefix') {
-        label = derivePagePrefix(page.url);
-        key = label.toLowerCase();
-      } else if (groupMode === 'sitemap') {
-        const source = (page.sitemap_source || 'Unknown sitemap').trim();
-        label = deriveSitemapLabel(source);
-        key = source.toLowerCase();
-      } else {
-        label = deriveCategory(page);
-        key = label.toLowerCase();
-      }
-      if (!map.has(key)) map.set(key, { label, pages: [] });
-      map.get(key)?.pages.push(page);
-    }
-    return Array.from(map.entries())
-      .map(([key, value]) => ({ key, label: value.label, pages: value.pages }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    return groupPages(filtered, groupMode);
   }, [filtered, groupMode]);
 
   const enabledCount = useMemo(() => pages.filter((page) => page.is_enabled).length, [pages]);
@@ -257,7 +200,7 @@ export default function Pages() {
                   ['prefix', 'Prefix'],
                   ['sitemap', 'Sitemap'],
                   ['categories', 'Categories'],
-                ] as Array<[GroupMode, string]>).map(([value, label]) => (
+                ] as Array<[PageGroupingMode, string]>).map(([value, label]) => (
                   <button
                     key={value}
                     onClick={() => setGroupMode(value)}
@@ -272,7 +215,7 @@ export default function Pages() {
                   ['all', 'All'],
                   ['enabled', 'Selected'],
                   ['disabled', 'Non Selected'],
-                ] as Array<[SelectionFilter, string]>).map(([value, label]) => (
+                ] as Array<[PageSelectionFilter, string]>).map(([value, label]) => (
                   <button
                     key={value}
                     onClick={() => setSelectionFilter(value)}

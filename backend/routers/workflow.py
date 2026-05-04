@@ -75,6 +75,14 @@ def workflow_generate_next(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
+    if payload.get("no_generation_reason"):
+        return {
+            "job_id": None,
+            "status": "skipped",
+            "expired_stale_jobs": expired_count,
+            "message": str(payload.get("no_generation_reason")),
+        }
+
     job = create_generation_job(db, website_id, payload, reason="manual_workflow")
     background_tasks.add_task(run_generation_job, job.id)
     return {

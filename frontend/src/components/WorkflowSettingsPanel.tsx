@@ -108,6 +108,7 @@ export default function WorkflowSettingsPanel() {
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatusResponse | null>(null);
   const [websiteSettingsRaw, setWebsiteSettingsRaw] = useState<Record<string, unknown>>({});
   const [form, setForm] = useState<WorkflowForm>(DEFAULT_FORM);
+  const [savedForm, setSavedForm] = useState<WorkflowForm>(DEFAULT_FORM);
   const [previewMonth, setPreviewMonth] = useState<Date>(() => {
     const today = new Date();
     return new Date(today.getFullYear(), today.getMonth(), 1);
@@ -188,7 +189,7 @@ export default function WorkflowSettingsPanel() {
           ? (raw.content as Record<string, unknown>)
           : {};
 
-        setForm({
+        const nextForm: WorkflowForm = {
           daily_pin_count: toNumber(generation.daily_pin_count, workflowRes.data.pins_per_day ?? DEFAULT_FORM.daily_pin_count),
           scheduling_window_days: toNumber(generation.scheduling_window_days, workflowRes.data.window_days ?? DEFAULT_FORM.scheduling_window_days),
           auto_regeneration_enabled: Boolean(generation.auto_regeneration_enabled ?? workflowRes.data.auto_regen_enabled ?? DEFAULT_FORM.auto_regeneration_enabled),
@@ -211,7 +212,9 @@ export default function WorkflowSettingsPanel() {
           floating_start_end_hours: Boolean(generation.floating_start_end_hours ?? generation.enable_start_end_hours ?? DEFAULT_FORM.floating_start_end_hours),
           start_window_flex_minutes: toNumber(generation.start_window_flex_minutes, DEFAULT_FORM.start_window_flex_minutes),
           end_window_flex_minutes: toNumber(generation.end_window_flex_minutes, DEFAULT_FORM.end_window_flex_minutes),
-        });
+        };
+        setForm(nextForm);
+        setSavedForm(nextForm);
       } catch (error) {
         console.error('Failed to load website workflow data:', error);
         setStatus('Failed to load website workflow data.');
@@ -291,6 +294,10 @@ export default function WorkflowSettingsPanel() {
   const activeWebsite = useMemo(
     () => websites.find((website) => website.id === activeWebsiteId) ?? null,
     [websites, activeWebsiteId],
+  );
+  const hasUnsavedChanges = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(savedForm),
+    [form, savedForm],
   );
 
   const pinCountByDay = useMemo(() => {
@@ -380,6 +387,7 @@ export default function WorkflowSettingsPanel() {
         max_floating_minutes: clamp(form.max_floating_minutes, 0, 240),
       });
       setWebsiteSettingsRaw(mergedWebsiteSettings);
+      setSavedForm(form);
       await refreshWorkflowStatus();
       setStatus('Workflow settings saved.');
     } catch (error) {
@@ -392,12 +400,18 @@ export default function WorkflowSettingsPanel() {
 
   async function generateNextBatch() {
     if (!activeWebsiteId) return;
+    if (hasUnsavedChanges) {
+      setStatus('You have unsaved workflow changes. Save changes before generating pins.');
+      return;
+    }
     setRunning(true);
     setStatus('Starting next batch generation...');
     try {
       const response = await apiClient.generateWorkflowNextBatch(activeWebsiteId);
-      localStorage.setItem('active_generation_job_id', String(response.data.job_id));
-      window.dispatchEvent(new CustomEvent<number>('generation-job-change', { detail: response.data.job_id }));
+      if (response.data.job_id != null) {
+        localStorage.setItem('active_generation_job_id', String(response.data.job_id));
+        window.dispatchEvent(new CustomEvent<number>('generation-job-change', { detail: response.data.job_id }));
+      }
       const staleInfo = response.data.expired_stale_jobs
         ? ` Cleared ${response.data.expired_stale_jobs} stale job(s).`
         : '';
@@ -408,8 +422,10 @@ export default function WorkflowSettingsPanel() {
       if ((error as { response?: { status?: number } })?.response?.status === 409) {
         try {
           const forced = await apiClient.generateWorkflowNextBatch(activeWebsiteId, true);
-          localStorage.setItem('active_generation_job_id', String(forced.data.job_id));
-          window.dispatchEvent(new CustomEvent<number>('generation-job-change', { detail: forced.data.job_id }));
+          if (forced.data.job_id != null) {
+            localStorage.setItem('active_generation_job_id', String(forced.data.job_id));
+            window.dispatchEvent(new CustomEvent<number>('generation-job-change', { detail: forced.data.job_id }));
+          }
           const staleInfo = forced.data.expired_stale_jobs
             ? ` Cleared ${forced.data.expired_stale_jobs} stale job(s).`
             : '';
@@ -449,6 +465,11 @@ export default function WorkflowSettingsPanel() {
         <div className="text-xs text-gray-500">
           {activeWebsite ? `Workflow settings for ${activeWebsite.name}` : 'No active website selected.'}
         </div>
+        {hasUnsavedChanges && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            You have unsaved workflow changes. Save changes before generating pins.
+          </div>
+        )}
       </div>
 
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
@@ -463,9 +484,6 @@ export default function WorkflowSettingsPanel() {
             className="mt-2 h-10 w-full px-3 rounded-md border border-gray-300 bg-white"
           />
         </label>
-        <Button className="w-full" onClick={() => void saveWorkflowSettings()} disabled={saving || !activeWebsiteId}>
-          {saving ? 'Saving...' : 'Submit'}
-        </Button>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-4">
@@ -773,9 +791,15 @@ export default function WorkflowSettingsPanel() {
         <Button
           className="w-full bg-emerald-600 text-white hover:bg-emerald-700"
           onClick={() => void generateNextBatch()}
-          disabled={running || !activeWebsiteId || Boolean(workflowStatus?.has_active_job)}
+          disabled={running || !activeWebsiteId || Boolean(workflowStatus?.has_active_job) || hasUnsavedChanges}
         >
-          {running ? 'Starting Generation...' : workflowStatus?.has_active_job ? 'Generation In Progress' : 'Generate Pins Now'}
+          {running
+            ? 'Starting Generation...'
+            : workflowStatus?.has_active_job
+              ? 'Generation In Progress'
+              : hasUnsavedChanges
+                ? 'Save Changes Before Generating'
+                : 'Generate Pins Now'}
         </Button>
       </div>
     </div>

@@ -762,7 +762,7 @@ export const apiClient = {
   getWorkflowStatus: (website_id: number) =>
     api.get<WorkflowStatusResponse>('/workflow/status', { params: { website_id } }),
   generateWorkflowNextBatch: (website_id: number, force = false) =>
-    api.post<{ job_id: number; status: string; message: string; expired_stale_jobs?: number }>(
+    api.post<{ job_id: number | null; status: string; message: string; expired_stale_jobs?: number }>(
       '/workflow/generate-next',
       null,
       { params: { website_id, force } },

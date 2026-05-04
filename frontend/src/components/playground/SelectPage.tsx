@@ -8,15 +8,13 @@ type SelectPageProps = {
   pages: PlaygroundPageItem[];
   selectedPageUrl: string;
   onSelectPage: (url: string) => void;
-  onRemoveImages: () => void;
-  onScrapeResult: (payload: { images: string[]; title: string; description: string }) => void;
+  onScrapeResult: (payload: { pageUrl: string; images: string[]; title: string; description: string }) => void;
 };
 
 export default function SelectPage({
   pages,
   selectedPageUrl,
   onSelectPage,
-  onRemoveImages,
   onScrapeResult,
 }: SelectPageProps) {
   const [scraping, setScraping] = useState(false);
@@ -33,7 +31,7 @@ export default function SelectPage({
     try {
       const response = await apiClient.getPlaygroundScrapeImages(url);
       const payload = response.data;
-      onScrapeResult(payload);
+      onScrapeResult({ ...payload, pageUrl: url });
       if (!Array.isArray(payload.images) || payload.images.length === 0) {
         setEmptyWarning('No images found from the selected page. Some hosts may block CORS.');
       }
@@ -80,9 +78,6 @@ export default function SelectPage({
 
       <div className="flex items-center justify-between">
         <div className="text-xs text-slate-500">{pages.length} pages available</div>
-        <Button variant="secondary" size="sm" onClick={onRemoveImages}>
-          Remove Images
-        </Button>
       </div>
 
       {scraping && <div className="text-xs text-slate-500">Scraping page images...</div>}

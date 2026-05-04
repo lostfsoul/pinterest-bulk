@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlparse
 from pathlib import Path
 
 import httpx
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from models import CustomFont, Page, SEOKeyword, Template, Website
 from services.ai_generation import DEFAULT_OPENAI_MODEL, call_model
+from routers.images import extract_main_content, is_wordpress_content_image
 
 
 PROMPT_STYLE_TEXT: dict[str, str] = {
@@ -268,9 +269,102 @@ def _extract_content_length(headers: dict[str, str]) -> int:
         return 0
 
 
+def _is_hidden_image_tag(img: Any) -> bool:
+    attrs = " ".join(
+        str(value)
+        for value in [
+            img.get("class") or "",
+            img.get("style") or "",
+            img.get("loading") or "",
+            img.get("aria-hidden") or "",
+            img.get("hidden") or "",
+        ]
+    ).lower()
+    return any(
+        marker in attrs
+        for marker in [
+            "display:none",
+            "display: none",
+            "visibility:hidden",
+            "visibility: hidden",
+            "hidden",
+            "lazy-hidden",
+            "screen-reader",
+        ]
+    )
+
+
+def _best_img_src(img: Any) -> str:
+    for attr in ("data-src", "data-lazy-src", "src"):
+        value = str(img.get(attr) or "").strip()
+        if value and not value.startswith("data:"):
+            return value
+    srcset = str(img.get("srcset") or img.get("data-srcset") or "").strip()
+    if srcset:
+        candidates = [part.strip().split(" ")[0] for part in srcset.split(",") if part.strip()]
+        if candidates:
+            return candidates[-1]
+    return ""
+
+
+def _text_tokens(value: str | None) -> set[str]:
+    stopwords = {
+        "the", "and", "for", "with", "from", "this", "that", "your", "you",
+        "recipe", "recipes", "easy", "best", "homemade", "simple", "quick",
+        "how", "make", "made", "guide", "food", "image", "photo", "jpg",
+        "jpeg", "png", "webp", "scaled", "copy",
+    }
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in str(value or ""))
+    return {token for token in cleaned.split() if len(token) >= 3 and token not in stopwords}
+
+
+def _image_url_tokens(image_url: str) -> set[str]:
+    parsed = urlparse(image_url)
+    filename = unquote(parsed.path.rsplit("/", 1)[-1])
+    return _text_tokens(filename.replace("-", " ").replace("_", " "))
+
+
+def _image_relevance_score(image_url: str, page_url: str, title: str) -> int:
+    title_tokens = _text_tokens(title)
+    page_tokens = _text_tokens(urlparse(page_url).path.replace("-", " ").replace("_", " "))
+    image_tokens = _image_url_tokens(image_url)
+    if not image_tokens:
+        return 0
+    return (len(image_tokens & title_tokens) * 3) + len(image_tokens & page_tokens)
+
+
+def _has_bad_image_ancestor(img: Any) -> bool:
+    bad_markers = [
+        "related", "recommend", "recommended", "popular", "trending", "more-post",
+        "more_post", "you-may", "you_may", "also-like", "also_like", "similar",
+        "sidebar", "widget", "footer", "header", "nav", "menu", "comment",
+        "author", "bio", "share", "social", "newsletter", "signup", "ad-",
+        " advert", "advertisement", "promo", "carousel", "swiper", "slick",
+        "roundup", "archive", "category-list", "post-grid", "card-grid",
+    ]
+    parent = img
+    depth = 0
+    while parent is not None and depth < 8:
+        attrs = " ".join(
+            str(value)
+            for value in [
+                parent.get("class") or "",
+                parent.get("id") or "",
+                parent.get("role") or "",
+                parent.get("aria-label") or "",
+                parent.name or "",
+            ]
+        ).lower()
+        if any(marker in attrs for marker in bad_markers):
+            return True
+        parent = parent.parent
+        depth += 1
+    return False
+
+
 async def _looks_large_enough(url: str, client: httpx.AsyncClient) -> bool:
     try:
-        response = await client.head(url, timeout=10.0, follow_redirects=True)
+        response = await client.head(url, timeout=4.0, follow_redirects=True)
         if response.status_code >= 400:
             return False
         content_length = _extract_content_length(dict(response.headers))
@@ -340,9 +434,15 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                 if p:
                     description = p.get_text(" ", strip=True)
 
+            main_soup = BeautifulSoup(extract_main_content(html), "html.parser")
+
             seen: set[str] = set()
-            for img in soup.find_all("img"):
-                src = str(img.get("src") or "").strip()
+            for img in main_soup.find_all("img"):
+                if _is_hidden_image_tag(img):
+                    continue
+                if _has_bad_image_ancestor(img):
+                    continue
+                src = _best_img_src(img)
                 if not src:
                     continue
                 absolute = urljoin(normalized_url, src)
@@ -361,11 +461,20 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                     height = 0
                 if width and width < 200:
                     continue
+                if height and height < 200:
+                    continue
+                parent = img.find_parent(["figure", "div", "p", "span"])
+                parent_classes = " ".join(parent.get("class", [])) if parent else ""
+                img_tag = str(img)
+                is_content_image = is_wordpress_content_image(parent_classes, img_tag)
+                relevance_score = _image_relevance_score(absolute, normalized_url, title)
                 image_candidates.append({
                     "url": absolute,
                     "width": width,
                     "height": height,
-                    "score": width * height,
+                    "is_content_image": is_content_image,
+                    "relevance_score": relevance_score,
+                    "score": (width * height) + (1_000_000 if is_content_image else 0) + (relevance_score * 2_000_000),
                 })
         else:
             import re
@@ -395,14 +504,20 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                 seen.add(absolute)
                 image_candidates.append({"url": absolute, "width": 0, "height": 0, "score": 0})
 
+        relevant_candidates = [
+            item for item in image_candidates
+            if item.get("relevance_score", 0) > 0 or item.get("is_content_image")
+        ]
+        image_candidates = relevant_candidates or image_candidates
         image_candidates.sort(key=lambda item: item["score"], reverse=True)
 
         images: list[str] = []
-        if og_image:
+        if og_image and not image_candidates:
             og_abs = urljoin(normalized_url, og_image)
             if await _looks_large_enough(og_abs, client):
                 images.append(og_abs)
 
+        head_checks = 0
         for candidate in image_candidates:
             if len(images) >= 10:
                 break
@@ -412,6 +527,9 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
             if candidate.get("width", 0) >= 200:
                 images.append(candidate_url)
                 continue
+            if head_checks >= 8:
+                break
+            head_checks += 1
             if await _looks_large_enough(candidate_url, client):
                 images.append(candidate_url)
 
