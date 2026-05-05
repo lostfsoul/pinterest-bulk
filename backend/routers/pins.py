@@ -485,7 +485,9 @@ def _generate_pin_drafts(
     if pins_created == 0:
         reason_parts = []
         if skipped["no_images"]:
-            reason_parts.append(f"{skipped['no_images']} page(s) have no available images")
+            reason_parts.append(
+                f"{skipped['no_images']} page(s) have no usable images after scraping and image filters"
+            )
         if skipped["gap"]:
             reason_parts.append(f"{skipped['gap']} page(s) blocked by desired gap days")
         if skipped["lifetime_limit"]:
@@ -493,6 +495,11 @@ def _generate_pin_drafts(
         if skipped["monthly_limit"]:
             reason_parts.append(f"{skipped['monthly_limit']} page(s) blocked by monthly limit")
         detail = "No pins were generated."
+        if skipped["no_images"] and not skipped["gap"] and not skipped["lifetime_limit"] and not skipped["monthly_limit"]:
+            detail = (
+                "No usable images found for the selected pages. "
+                "Import/scrape images or loosen image filters before generating."
+            )
         if reason_parts:
             detail = f"{detail} " + "; ".join(reason_parts) + "."
         raise HTTPException(status_code=400, detail=detail)

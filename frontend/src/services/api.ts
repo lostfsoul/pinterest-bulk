@@ -471,7 +471,7 @@ export const apiClient = {
     api.patch<PageBulkUpdateResponse>('/websites/pages/bulk', data),
 
   // Keywords
-  uploadKeywords: (file: File) => {
+  uploadKeywords: (file: File, website_id?: number) => {
     const formData = new FormData();
     formData.append('file', file);
     return api.post<{
@@ -480,7 +480,7 @@ export const apiClient = {
       unmatched_urls: string[];
       duplicates_skipped: number;
       errors: string[];
-    }>('/keywords/upload', formData);
+    }>('/keywords/upload', formData, { params: { website_id } });
   },
   uploadTrendKeywords: (websiteId: number, file: File) => {
     const formData = new FormData();
@@ -489,12 +489,12 @@ export const apiClient = {
       params: { website_id: websiteId },
     });
   },
-  getKeywordsStatus: () => api.get<{
+  getKeywordsStatus: (website_id?: number) => api.get<{
     total_pages: number;
     pages_with_keywords: number;
     total_keywords: number;
     coverage_percent: number;
-  }>('/keywords'),
+  }>('/keywords', { params: { website_id } }),
   listKeywordEntries: (params: { website_id: number; limit?: number }) =>
     api.get<KeywordEntry[]>('/keywords/entries', { params }),
   updateKeywordEntry: (data: { url: string; keywords: string }) =>

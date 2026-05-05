@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, Loader2, Search } from 'lucide-react';
 import apiClient, {
+  KeywordEntry,
   Page,
+  PageImage,
   PlaygroundFontSet,
-  PlaygroundPageItem,
   PlaygroundSettings,
   PlaygroundTemplateItem,
   ScheduleSettings,
@@ -19,6 +20,7 @@ import {
 } from './ui/dialog';
 import SvgRenderer from './playground/SvgRenderer';
 import PreviewSidebar from './playground/PreviewSidebar';
+import GlobalExclusionsPanel from './shared/GlobalExclusionsPanel';
 import {
   filterPages,
   groupPages,
@@ -51,10 +53,19 @@ type WorkflowDraft = {
   max_floating_minutes: number;
 };
 
+type KeywordUploadResult = {
+  total_rows: number;
+  matched_pages: number;
+  unmatched_urls: string[];
+  duplicates_skipped: number;
+  errors: string[];
+};
+
 const STEPS = [
+  { title: 'Pages To Use', subtitle: 'Import and select pages' },
   { title: 'Pin Preview', subtitle: 'Customize pin appearance' },
   { title: 'Generation Settings', subtitle: 'Configure scheduling' },
-  { title: 'Pages To Use', subtitle: 'Select pages' },
+  { title: 'SEO Keywords', subtitle: 'Upload optional keywords' },
   { title: 'Boards To Use', subtitle: 'Choose boards or CSV names' },
   { title: 'Review & Generate', subtitle: 'Start generating pins' },
 ];
@@ -69,6 +80,11 @@ const DEFAULT_WORKFLOW: WorkflowDraft = {
   randomize_posting_times: true,
   max_floating_minutes: 45,
 };
+
+const SAMPLE_IMAGES = [
+  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="0" x2="1" y1="0" y2="1"%3E%3Cstop stop-color="%23f59e0b"/%3E%3Cstop offset="1" stop-color="%23dc2626"/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width="900" height="1200" fill="url(%23g)"/%3E%3Ccircle cx="700" cy="240" r="180" fill="%23fff7ed" opacity=".35"/%3E%3Ccircle cx="230" cy="760" r="260" fill="%23ffffff" opacity=".22"/%3E%3C/svg%3E',
+  'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="1" x2="0" y1="0" y2="1"%3E%3Cstop stop-color="%230f766e"/%3E%3Cstop offset="1" stop-color="%2384cc16"/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width="900" height="1200" fill="url(%23g)"/%3E%3Ccircle cx="230" cy="260" r="190" fill="%23ecfccb" opacity=".33"/%3E%3Ccircle cx="670" cy="820" r="240" fill="%23ffffff" opacity=".2"/%3E%3C/svg%3E',
+];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -114,6 +130,10 @@ function splitBoards(value: string): string[] {
   return boards;
 }
 
+function usableImages(images: PageImage[]): PageImage[] {
+  return images.filter((image) => !image.is_excluded && !image.excluded_by_global_rule);
+}
+
 export function shouldShowOnboarding(website: Website | null): boolean {
   if (!website?.generation_settings) return false;
   const onboarding = asRecord(website.generation_settings.onboarding);
@@ -135,7 +155,6 @@ export default function OnboardingModal({
   const [schedule, setSchedule] = useState<ScheduleSettings | null>(null);
   const [templates, setTemplates] = useState<PlaygroundTemplateItem[]>([]);
   const [fontSets, setFontSets] = useState<PlaygroundFontSet[]>([]);
-  const [playgroundPages, setPlaygroundPages] = useState<PlaygroundPageItem[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<number | null>(null);
   const [activeFontSetId, setActiveFontSetId] = useState('');
   const [activeFontColor, setActiveFontColor] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.fontColor);
@@ -145,8 +164,23 @@ export default function OnboardingModal({
   const [workflow, setWorkflow] = useState<WorkflowDraft>(DEFAULT_WORKFLOW);
   const [pages, setPages] = useState<Page[]>([]);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<number>>(new Set());
+  const [previewPageId, setPreviewPageId] = useState<number | null>(null);
+  const [previewPageImages, setPreviewPageImages] = useState<PageImage[]>([]);
+  const [previewImagesLoading, setPreviewImagesLoading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [uploadingTemplate, setUploadingTemplate] = useState(false);
+  const [templateUploadName, setTemplateUploadName] = useState('');
+  const [templateUploadFile, setTemplateUploadFile] = useState<File | null>(null);
   const [boardsText, setBoardsText] = useState('');
+  const [keywordUploading, setKeywordUploading] = useState(false);
+  const [keywordUploadResult, setKeywordUploadResult] = useState<KeywordUploadResult | null>(null);
+  const [keywordStatus, setKeywordStatus] = useState<{
+    total_pages: number;
+    pages_with_keywords: number;
+    total_keywords: number;
+    coverage_percent: number;
+  } | null>(null);
+  const [keywordEntries, setKeywordEntries] = useState<KeywordEntry[]>([]);
   const [pageQuery, setPageQuery] = useState('');
   const [pageGroupMode, setPageGroupMode] = useState<PageGroupingMode>('prefix');
   const [pageSelectionFilter, setPageSelectionFilter] = useState<PageSelectionFilter>('all');
@@ -163,17 +197,22 @@ export default function OnboardingModal({
   const activeFontFamily = activeFontSet?.main || 'Bebas Neue';
   const boards = useMemo(() => splitBoards(boardsText), [boardsText]);
   const enabledPagesCount = selectedPageIds.size;
+  const selectedPages = useMemo(
+    () => pages.filter((page) => selectedPageIds.has(page.id)),
+    [pages, selectedPageIds],
+  );
   const previewPage = useMemo(() => {
-    return pages.find((page) => selectedPageIds.has(page.id)) ?? pages[0] ?? null;
-  }, [pages, selectedPageIds]);
-  const previewImages = useMemo(() => {
-    const sampleImages = [
-      'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="0" x2="1" y1="0" y2="1"%3E%3Cstop stop-color="%23f59e0b"/%3E%3Cstop offset="1" stop-color="%23dc2626"/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width="900" height="1200" fill="url(%23g)"/%3E%3Ccircle cx="700" cy="240" r="180" fill="%23fff7ed" opacity=".35"/%3E%3Ccircle cx="230" cy="760" r="260" fill="%23ffffff" opacity=".22"/%3E%3C/svg%3E',
-      'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200"%3E%3Cdefs%3E%3ClinearGradient id="g" x1="1" x2="0" y1="0" y2="1"%3E%3Cstop stop-color="%230f766e"/%3E%3Cstop offset="1" stop-color="%2384cc16"/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width="900" height="1200" fill="url(%23g)"/%3E%3Ccircle cx="230" cy="260" r="190" fill="%23ecfccb" opacity=".33"/%3E%3Ccircle cx="670" cy="820" r="240" fill="%23ffffff" opacity=".2"/%3E%3C/svg%3E',
-    ];
-    const pageImages = playgroundPages.find((page) => page.url === previewPage?.url)?.images;
-    return Array.isArray(pageImages) && pageImages.length > 0 ? pageImages : sampleImages;
-  }, [playgroundPages, previewPage]);
+    return selectedPages.find((page) => page.id === previewPageId)
+      ?? selectedPages[0]
+      ?? pages.find((page) => page.id === previewPageId)
+      ?? pages[0]
+      ?? null;
+  }, [pages, previewPageId, selectedPages]);
+  const realPreviewImages = useMemo(
+    () => usableImages(previewPageImages).map((image) => image.url),
+    [previewPageImages],
+  );
+  const previewImages = realPreviewImages.length > 0 ? realPreviewImages : SAMPLE_IMAGES;
   const filteredPages = useMemo(() => {
     const pageItems = pages.map((page) => ({
       ...page,
@@ -186,20 +225,38 @@ export default function OnboardingModal({
   }, [filteredPages, pageGroupMode]);
 
   useEffect(() => {
+    if (selectedPages.length === 0) {
+      setPreviewPageId(null);
+      setPreviewPageImages([]);
+      return;
+    }
+    if (previewPageId && selectedPages.some((page) => page.id === previewPageId)) return;
+    const index = Math.floor(Math.random() * selectedPages.length);
+    setPreviewPageId(selectedPages[index]?.id ?? null);
+  }, [previewPageId, selectedPages]);
+
+  useEffect(() => {
+    if (!open || step !== 1 || !previewPage?.id) return;
+    void loadPreviewPageImages(previewPage.id, true);
+  }, [open, previewPage?.id, step]);
+
+  useEffect(() => {
     if (!open || !website) return;
     let active = true;
     const load = async () => {
       setLoading(true);
       setStatus('');
       setStep(0);
+      setPreviewPageImages([]);
       try {
-        const [settingsRes, templatesRes, fontsRes, scheduleRes, pagesRes, playgroundPagesRes] = await Promise.all([
+        const [settingsRes, templatesRes, fontsRes, scheduleRes, pagesRes, keywordStatusRes, keywordEntriesRes] = await Promise.all([
           apiClient.getWebsiteGenerationSettings(website.id),
           apiClient.getPlaygroundTemplates(),
           apiClient.getPlaygroundFonts(),
           apiClient.getScheduleSettings(),
           apiClient.listWebsitePages(website.id),
-          apiClient.getPlaygroundPages(website.id).catch(() => ({ data: [] as PlaygroundPageItem[] })),
+          apiClient.getKeywordsStatus(website.id).catch(() => ({ data: null })),
+          apiClient.listKeywordEntries({ website_id: website.id, limit: 5 }).catch(() => ({ data: [] as KeywordEntry[] })),
         ]);
         if (!active) return;
 
@@ -225,11 +282,18 @@ export default function OnboardingModal({
           ? persistedFontSetId
           : (filteredFonts[0]?.id || '');
 
+        const pageItems = pagesRes.data || [];
+        const enabledIds = new Set(pageItems.filter((page) => page.is_enabled).map((page) => page.id));
+        const previewCandidates = pageItems.filter((page) => enabledIds.has(page.id));
+        const previewIndex = previewCandidates.length > 0 ? Math.floor(Math.random() * previewCandidates.length) : 0;
+
         setSettings(nextSettings);
         setSchedule(scheduleRes.data);
         setTemplates(templateItems);
         setFontSets(filteredFonts);
-        setPlaygroundPages(playgroundPagesRes.data || []);
+        setKeywordStatus(keywordStatusRes.data);
+        setKeywordEntries(keywordEntriesRes.data || []);
+        setKeywordUploadResult(null);
         setSelectedTemplateId(Number.isFinite(fallbackTemplateId) ? fallbackTemplateId : null);
         setActiveFontSetId(fallbackFontSetId);
         setActiveFontColor(String(playgroundSettings?.font_color || DEFAULT_PLAYGROUND_TEXT_SETTINGS.fontColor));
@@ -246,9 +310,9 @@ export default function OnboardingModal({
           randomize_posting_times: Boolean(generation.randomize_posting_times ?? scheduleRes.data.random_minutes ?? DEFAULT_WORKFLOW.randomize_posting_times),
           max_floating_minutes: clamp(Number(generation.max_floating_minutes ?? scheduleRes.data.max_floating_minutes ?? DEFAULT_WORKFLOW.max_floating_minutes), 0, 240),
         });
-        const pageItems = pagesRes.data || [];
         setPages(pageItems);
-        setSelectedPageIds(new Set(pageItems.filter((page) => page.is_enabled).map((page) => page.id)));
+        setSelectedPageIds(enabledIds);
+        setPreviewPageId(previewCandidates[previewIndex]?.id ?? pageItems[0]?.id ?? null);
         setPageQuery('');
         setPageGroupMode('prefix');
         setPageSelectionFilter('all');
@@ -279,6 +343,158 @@ export default function OnboardingModal({
     return next;
   }
 
+  async function loadPreviewPageImages(pageId: number, scrapeIfEmpty: boolean) {
+    setPreviewImagesLoading(true);
+    try {
+      let response = await apiClient.getPageImages(pageId);
+      let images = response.data || [];
+      if (scrapeIfEmpty && usableImages(images).length === 0) {
+        setStatus('Fetching real images for the selected preview page...');
+        await apiClient.scrapePageImages(pageId);
+        response = await apiClient.getPageImages(pageId);
+        images = response.data || [];
+        setStatus(usableImages(images).length > 0 ? 'Preview images loaded.' : 'No usable images found for this preview page.');
+      }
+      setPreviewPageImages(images);
+    } catch (error) {
+      console.error('Failed to load preview page images:', error);
+      setPreviewPageImages([]);
+      setStatus('Failed to load preview images for this page.');
+    } finally {
+      setPreviewImagesLoading(false);
+    }
+  }
+
+  async function refreshActivePreviewImages() {
+    if (!previewPage?.id) return;
+    await loadPreviewPageImages(previewPage.id, false);
+  }
+
+  async function refreshKeywords() {
+    if (!website) return;
+    const [statusRes, entriesRes] = await Promise.all([
+      apiClient.getKeywordsStatus(website.id).catch(() => ({ data: null })),
+      apiClient.listKeywordEntries({ website_id: website.id, limit: 5 }).catch(() => ({ data: [] as KeywordEntry[] })),
+    ]);
+    setKeywordStatus(statusRes.data);
+    setKeywordEntries(entriesRes.data || []);
+  }
+
+  async function refreshTemplateList(): Promise<PlaygroundTemplateItem[]> {
+    const response = await apiClient.getPlaygroundTemplates();
+    const items = response.data.templates || [];
+    setTemplates(items);
+    return items;
+  }
+
+  async function handleUploadTemplate() {
+    const name = templateUploadName.trim();
+    if (!name || !templateUploadFile) {
+      setStatus('Add a template name and SVG file first.');
+      return;
+    }
+    setUploadingTemplate(true);
+    setStatus('Uploading template...');
+    try {
+      const uploaded = await apiClient.uploadTemplate(name, templateUploadFile);
+      const items = await refreshTemplateList();
+      const created = items.find((template) => template.id === uploaded.data.id);
+      if (created) {
+        setSelectedTemplateId(created.id);
+      }
+      setTemplateUploadName('');
+      setTemplateUploadFile(null);
+      setStatus('Template uploaded.');
+    } catch (error) {
+      console.error('Failed to upload template:', error);
+      setStatus('Failed to upload template.');
+    } finally {
+      setUploadingTemplate(false);
+    }
+  }
+
+  async function handleDeleteTemplate(templateId: number) {
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) return;
+    if (!window.confirm(`Delete template "${template.name}"?`)) return;
+    setStatus('Deleting template...');
+    try {
+      await apiClient.deleteTemplate(templateId);
+      const items = await refreshTemplateList();
+      setSelectedTemplateId((prev) => {
+        if (prev !== templateId && items.some((item) => item.id === prev)) return prev;
+        return items[0]?.id ?? null;
+      });
+      setStatus('Template deleted.');
+    } catch (error) {
+      console.error('Failed to delete template:', error);
+      setStatus('Failed to delete template.');
+    }
+  }
+
+  function randomizePreviewPage() {
+    if (selectedPages.length <= 1) return;
+    const candidates = selectedPages.filter((page) => page.id !== previewPage?.id);
+    const pool = candidates.length > 0 ? candidates : selectedPages;
+    const index = Math.floor(Math.random() * pool.length);
+    setPreviewPageId(pool[index]?.id ?? null);
+  }
+
+  function downloadKeywordTemplate() {
+    const csv = [
+      'url,keywords',
+      '"https://example.com/article1","summer corn salad,bright side dish"',
+      '"https://example.com/article2","quick family dinner,easy weeknight meal"',
+    ].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'keywords_template.csv';
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function uploadKeywordFile(file: File) {
+    setKeywordUploading(true);
+    setKeywordUploadResult(null);
+    setStatus('Uploading SEO keywords...');
+    try {
+      if (!website) return;
+      const response = await apiClient.uploadKeywords(file, website.id);
+      setKeywordUploadResult(response.data);
+      await refreshKeywords();
+      setStatus('SEO keywords uploaded.');
+    } catch (error) {
+      console.error('Failed to upload SEO keywords:', error);
+      setStatus('Failed to upload SEO keywords. Check CSV format.');
+    } finally {
+      setKeywordUploading(false);
+    }
+  }
+
+  async function savePagesStep() {
+    if (!website) return false;
+    if (selectedPageIds.size === 0) {
+      setStatus('Select at least one page before continuing.');
+      return false;
+    }
+    const allIds = pages.map((page) => page.id);
+    const selectedIds = Array.from(selectedPageIds);
+    if (allIds.length > 0) {
+      await apiClient.updatePagesBulk({ page_ids: allIds, is_enabled: false });
+      await apiClient.updatePagesBulk({ page_ids: selectedIds, is_enabled: true });
+      const pagesRes = await apiClient.listWebsitePages(website.id);
+      const nextPages = pagesRes.data || [];
+      setPages(nextPages);
+      if (!selectedIds.includes(previewPageId ?? -1)) {
+        setPreviewPageId(selectedIds[0] ?? null);
+      }
+    }
+    await saveSettingsPatch({ onboarding: { current_step: 1 } });
+    return true;
+  }
+
   async function saveTemplateStep() {
     if (!website || !selectedTemplateId) {
       setStatus('Choose a template before continuing.');
@@ -305,7 +521,7 @@ export default function OnboardingModal({
     await apiClient.savePlaygroundSettings(website.id, payload);
     await saveSettingsPatch({
       design: { template_ids: selected },
-      onboarding: { current_step: 1 },
+      onboarding: { current_step: 2 },
     });
     return true;
   }
@@ -323,7 +539,7 @@ export default function OnboardingModal({
         randomize_posting_times: workflow.randomize_posting_times,
         max_floating_minutes: workflow.max_floating_minutes,
       },
-      onboarding: { current_step: 2 },
+      onboarding: { current_step: 3 },
     });
     await apiClient.updateScheduleSettings({
       pins_per_day: workflow.daily_pin_count,
@@ -345,14 +561,14 @@ export default function OnboardingModal({
     setStatus('Importing sitemap pages...');
     try {
       const result = await apiClient.importSitemap(website.id);
-      const [pagesRes, playgroundPagesRes] = await Promise.all([
-        apiClient.listWebsitePages(website.id),
-        apiClient.getPlaygroundPages(website.id).catch(() => ({ data: [] as PlaygroundPageItem[] })),
-      ]);
+      const pagesRes = await apiClient.listWebsitePages(website.id);
       const nextPages = pagesRes.data || [];
+      const enabledIds = new Set(nextPages.filter((page) => page.is_enabled).map((page) => page.id));
+      const fallbackIds = enabledIds.size > 0 ? enabledIds : new Set(nextPages.map((page) => page.id));
       setPages(nextPages);
-      setPlaygroundPages(playgroundPagesRes.data || []);
-      setSelectedPageIds(new Set(nextPages.filter((page) => page.is_enabled).map((page) => page.id)));
+      setSelectedPageIds(fallbackIds);
+      setPreviewPageId(Array.from(fallbackIds)[0] ?? null);
+      setPreviewPageImages([]);
       setCollapsedGroups(new Set());
       setStatus(`Imported ${result.data.total_urls} URL(s).`);
     } catch (error) {
@@ -363,28 +579,15 @@ export default function OnboardingModal({
     }
   }
 
-  async function savePagesStep() {
-    if (!website) return false;
-    if (selectedPageIds.size === 0) {
-      setStatus('Select at least one page before continuing.');
-      return false;
-    }
-    const allIds = pages.map((page) => page.id);
-    const selectedIds = Array.from(selectedPageIds);
-    if (allIds.length > 0) {
-      await apiClient.updatePagesBulk({ page_ids: allIds, is_enabled: false });
-      await apiClient.updatePagesBulk({ page_ids: selectedIds, is_enabled: true });
-      const pagesRes = await apiClient.listWebsitePages(website.id);
-      setPages(pagesRes.data || []);
-    }
-    await saveSettingsPatch({ onboarding: { current_step: 3 } });
+  async function saveSeoStep() {
+    await saveSettingsPatch({ onboarding: { current_step: 4 } });
     return true;
   }
 
   async function saveBoardsStep() {
     await saveSettingsPatch({
       ai: { board_candidates: boards },
-      onboarding: { current_step: 4 },
+      onboarding: { current_step: 5 },
     });
     return true;
   }
@@ -406,10 +609,11 @@ export default function OnboardingModal({
     setStatus('');
     try {
       const ok =
-        step === 0 ? await saveTemplateStep()
-          : step === 1 ? await saveWorkflowStep()
-            : step === 2 ? await savePagesStep()
-              : step === 3 ? await saveBoardsStep()
+        step === 0 ? await savePagesStep()
+          : step === 1 ? await saveTemplateStep()
+            : step === 2 ? await saveWorkflowStep()
+              : step === 3 ? await saveSeoStep()
+                : step === 4 ? await saveBoardsStep()
                 : true;
       if (ok) setStep((prev) => Math.min(STEPS.length - 1, prev + 1));
     } catch (error) {
@@ -472,8 +676,8 @@ export default function OnboardingModal({
   }
 
   const canContinue =
-    step === 0 ? Boolean(selectedTemplateId)
-      : step === 2 ? selectedPageIds.size > 0
+    step === 0 ? selectedPageIds.size > 0
+      : step === 1 ? Boolean(selectedTemplateId)
         : true;
 
   return (
@@ -486,7 +690,7 @@ export default function OnboardingModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="relative mb-2 grid grid-cols-5 gap-2 border-b border-slate-200 pb-5">
+        <div className="relative mb-2 grid grid-cols-3 gap-2 border-b border-slate-200 pb-5 md:grid-cols-6">
           <div className="absolute left-8 right-8 top-4 h-0.5 bg-slate-200" />
           <div
             className="absolute left-8 top-4 h-0.5 bg-pink-600 transition-all"
@@ -523,16 +727,151 @@ export default function OnboardingModal({
           <div className="min-h-[420px]">
             {step === 0 && (
               <div className="space-y-4">
-                <div>
-                  <h3 className="text-base font-semibold text-slate-900">Choose and preview the first pin template</h3>
-                  <p className="text-sm text-slate-500">This uses the same renderer as Playground and becomes the default template for first generation.</p>
-                </div>
-                {templates.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">
-                    No templates available. Upload a template in Playground first.
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-900">Import and select pages</h3>
+                    <p className="text-sm text-slate-500">Choose the pages that can be used for the first generation and preview images.</p>
                   </div>
-                ) : (
-                  <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                  <Button variant="outline" onClick={() => void importPages()} disabled={importing || !website}>
+                    {importing ? 'Importing...' : 'Import Sitemap Pages'}
+                  </Button>
+                </div>
+                <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <input
+                      value={pageQuery}
+                      onChange={(event) => setPageQuery(event.target.value)}
+                      placeholder="Search by URL or title"
+                      className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <div className="inline-flex rounded-md border border-slate-300 p-0.5">
+                      {([
+                        ['prefix', 'Prefix'],
+                        ['sitemap', 'Sitemap'],
+                        ['categories', 'Categories'],
+                      ] as Array<[PageGroupingMode, string]>).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setPageGroupMode(value)}
+                          className={`rounded px-3 py-1.5 text-xs ${pageGroupMode === value ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="inline-flex rounded-md border border-slate-300 p-0.5">
+                      {([
+                        ['all', 'All'],
+                        ['enabled', 'Selected'],
+                        ['disabled', 'Non Selected'],
+                      ] as Array<[PageSelectionFilter, string]>).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setPageSelectionFilter(value)}
+                          className={`rounded px-3 py-1.5 text-xs ${pageSelectionFilter === value ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                  <span>{selectedPageIds.size} of {pages.length} selected</span>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => setPagesSelection(filteredPages.map((page) => page.id), true)}>Enable Visible</Button>
+                    <Button size="sm" variant="outline" onClick={() => setPagesSelection(filteredPages.map((page) => page.id), false)}>Disable Visible</Button>
+                  </div>
+                </div>
+                <div className="max-h-[420px] overflow-y-auto rounded-md border border-slate-200">
+                  {pages.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-slate-500">Import sitemap pages to continue.</div>
+                  ) : pageGroups.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-slate-500">No pages match the current filters.</div>
+                  ) : pageGroups.map((group) => {
+                    const selectedInGroup = group.pages.filter((page) => selectedPageIds.has(page.id)).length;
+                    const fullySelected = selectedInGroup === group.pages.length && group.pages.length > 0;
+                    const collapsed = collapsedGroups.has(group.key);
+                    return (
+                      <div key={group.key} className="border-b border-slate-200 last:border-b-0">
+                        <div className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={fullySelected}
+                              onChange={() => setPagesSelection(group.pages.map((page) => page.id), !fullySelected)}
+                            />
+                            <button
+                              type="button"
+                              className="truncate text-left text-sm font-medium text-slate-900"
+                              onClick={() => setPagesSelection(group.pages.map((page) => page.id), !fullySelected)}
+                            >
+                              {group.label}
+                            </button>
+                            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
+                              {selectedInGroup}/{group.pages.length} selected
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            className="rounded-md border border-slate-300 p-1 text-slate-600"
+                            onClick={() => {
+                              setCollapsedGroups((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(group.key)) next.delete(group.key);
+                                else next.add(group.key);
+                                return next;
+                              });
+                            }}
+                          >
+                            {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                          </button>
+                        </div>
+                        {!collapsed && group.pages.map((page) => (
+                          <label key={page.id} className="flex items-center justify-between gap-3 border-t border-slate-100 px-3 py-2">
+                            <span className="flex min-w-0 items-center gap-2">
+                              <input type="checkbox" checked={selectedPageIds.has(page.id)} onChange={() => togglePage(page.id)} />
+                              <span className="truncate text-sm text-slate-700">{page.title || page.url}</span>
+                            </span>
+                            <span className="hidden max-w-xs shrink-0 truncate text-xs text-slate-500 md:block">{page.url}</span>
+                          </label>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {step === 1 && (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-semibold text-slate-900">Choose and preview the first pin template</h3>
+                    <p className="text-sm text-slate-500">
+                      This uses real images from one selected page and becomes the default template for first generation.
+                    </p>
+                    {previewPage && (
+                      <p className="mt-1 text-xs text-slate-500">Previewing: {previewPage.title || previewPage.url}</p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={randomizePreviewPage} disabled={selectedPages.length <= 1}>
+                      Randomize Preview Page
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={() => previewPage?.id && void loadPreviewPageImages(previewPage.id, true)} disabled={!previewPage || previewImagesLoading}>
+                      {previewImagesLoading ? 'Loading Images...' : 'Refresh Images'}
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+                  <div className="space-y-4">
                     <div className="rounded-xl border border-slate-200 bg-slate-950 p-4">
                       {selectedTemplate ? (
                         <div className="mx-auto max-h-[560px] max-w-[430px] overflow-auto rounded-lg border border-slate-700 bg-slate-900 p-3">
@@ -564,11 +903,52 @@ export default function OnboardingModal({
                         </div>
                       ) : (
                         <div className="flex h-[460px] items-center justify-center rounded-lg border border-dashed border-slate-700 text-sm text-slate-400">
-                          Choose a template to preview.
+                          {templates.length === 0 ? 'Upload a template to preview.' : 'Choose a template to preview.'}
                         </div>
                       )}
                     </div>
+
+                    <GlobalExclusionsPanel
+                      selectedPageId={previewPage?.id ?? null}
+                      previewImages={realPreviewImages}
+                      previewImageRows={usableImages(previewPageImages)}
+                      showPreviewImageActions
+                      onChanged={refreshActivePreviewImages}
+                    />
+                  </div>
+                  <div className="space-y-3">
                     <div className="rounded-lg border border-slate-200 p-3">
+                      <div className="text-xs font-semibold text-slate-700">Upload Template</div>
+                      <div className="mt-2 space-y-2">
+                        <input
+                          value={templateUploadName}
+                          onChange={(event) => setTemplateUploadName(event.target.value)}
+                          placeholder="Template name"
+                          className="h-9 w-full rounded-md border border-slate-300 px-2 text-sm"
+                        />
+                        <input
+                          type="file"
+                          accept=".svg"
+                          onChange={(event) => setTemplateUploadFile(event.target.files?.[0] || null)}
+                          className="block w-full text-xs text-slate-500 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-full"
+                          onClick={() => void handleUploadTemplate()}
+                          disabled={uploadingTemplate || !templateUploadName.trim() || !templateUploadFile}
+                        >
+                          {uploadingTemplate ? 'Uploading...' : 'Upload SVG Template'}
+                        </Button>
+                      </div>
+                    </div>
+                    {templates.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-sm text-slate-500">
+                        No templates available yet.
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border border-slate-200 p-3">
                       <PreviewSidebar
                         fontSets={fontSets}
                         activeFontSetId={activeFontSetId}
@@ -582,18 +962,24 @@ export default function OnboardingModal({
                         onToggleTemplateSelection={(id) => setSelectedTemplateId((prev) => (prev === id ? null : id))}
                         defaultTemplateId={selectedTemplateId}
                         onSetDefaultTemplate={setSelectedTemplateId}
+                        onDeleteTemplate={(id) => void handleDeleteTemplate(id)}
                         titleScale={titleScale}
                         titlePaddingX={titlePaddingX}
                         lineHeightMultiplier={lineHeightMultiplier}
                         onResetTextSettings={resetTextSettings}
+                        previewImages={previewImages}
+                        previewTitle={previewPage?.title || 'Your First Pinterest Pin'}
+                        activeFontFamily={activeFontFamily}
+                        activeFontFile={activeFontSet?.font_file || null}
                       />
-                    </div>
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
               </div>
             )}
 
-            {step === 1 && (
+            {step === 2 && (
               <div className="space-y-4">
                 <div>
                   <h3 className="text-base font-semibold text-slate-900">Configure the first schedule</h3>
@@ -638,127 +1024,71 @@ export default function OnboardingModal({
               </div>
             )}
 
-            {step === 2 && (
+            {step === 3 && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold text-slate-900">Import and select pages</h3>
-                    <p className="text-sm text-slate-500">Enabled pages become candidates for first generation.</p>
-                  </div>
-                  <Button variant="outline" onClick={() => void importPages()} disabled={importing || !website}>
-                    {importing ? 'Importing...' : 'Import Sitemap Pages'}
-                  </Button>
+                <div>
+                  <h3 className="text-base font-semibold text-slate-900">Upload SEO keywords</h3>
+                  <p className="text-sm text-slate-500">Upload the same SEO keyword CSV used in the Keywords page. CSV headers: <code>url,keywords</code></p>
                 </div>
-                <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <div className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+                  <div className="space-y-3 rounded-md border border-slate-200 bg-white p-3">
+                    <Button variant="outline" size="sm" onClick={downloadKeywordTemplate}>
+                      Download SEO Template
+                    </Button>
                     <input
-                      value={pageQuery}
-                      onChange={(event) => setPageQuery(event.target.value)}
-                      placeholder="Search by URL or title"
-                      className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm"
+                      type="file"
+                      accept=".csv"
+                      disabled={keywordUploading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void uploadKeywordFile(file);
+                        event.target.value = '';
+                      }}
+                      className="block w-full text-sm text-slate-500 file:mr-4 file:rounded-md file:border-0 file:bg-blue-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-blue-700 hover:file:bg-blue-100 disabled:opacity-60"
                     />
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <div className="inline-flex rounded-md border border-slate-300 p-0.5">
-                      {([
-                        ['prefix', 'Prefix'],
-                        ['sitemap', 'Sitemap'],
-                        ['categories', 'Categories'],
-                      ] as Array<[PageGroupingMode, string]>).map(([value, label]) => (
-                        <button
-                          key={value}
-                          onClick={() => setPageGroupMode(value)}
-                          className={`rounded px-3 py-1.5 text-xs ${pageGroupMode === value ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="inline-flex rounded-md border border-slate-300 p-0.5">
-                      {([
-                        ['all', 'All'],
-                        ['enabled', 'Selected'],
-                        ['disabled', 'Non Selected'],
-                      ] as Array<[PageSelectionFilter, string]>).map(([value, label]) => (
-                        <button
-                          key={value}
-                          onClick={() => setPageSelectionFilter(value)}
-                          className={`rounded px-3 py-1.5 text-xs ${pageSelectionFilter === value ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                  <span>{selectedPageIds.size} of {pages.length} selected</span>
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => setPagesSelection(filteredPages.map((page) => page.id), true)}>Enable Visible</Button>
-                    <Button size="sm" variant="outline" onClick={() => setPagesSelection(filteredPages.map((page) => page.id), false)}>Disable Visible</Button>
-                  </div>
-                </div>
-                <div className="max-h-[420px] overflow-y-auto rounded-md border border-slate-200">
-                  {pages.length === 0 ? (
-                    <div className="p-8 text-center text-sm text-slate-500">Import sitemap pages to continue.</div>
-                  ) : pageGroups.length === 0 ? (
-                    <div className="p-8 text-center text-sm text-slate-500">No pages match the current filters.</div>
-                  ) : pageGroups.map((group) => {
-                    const selectedInGroup = group.pages.filter((page) => selectedPageIds.has(page.id)).length;
-                    const fullySelected = selectedInGroup === group.pages.length && group.pages.length > 0;
-                    const collapsed = collapsedGroups.has(group.key);
-                    return (
-                      <div key={group.key} className="border-b border-slate-200 last:border-b-0">
-                        <div className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2">
-                          <div className="flex min-w-0 items-center gap-2">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4"
-                              checked={fullySelected}
-                              onChange={() => setPagesSelection(group.pages.map((page) => page.id), !fullySelected)}
-                            />
-                            <button
-                              className="truncate text-left text-sm font-medium text-slate-900"
-                              onClick={() => setPagesSelection(group.pages.map((page) => page.id), !fullySelected)}
-                            >
-                              {group.label}
-                            </button>
-                            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
-                              {selectedInGroup}/{group.pages.length} selected
-                            </span>
-                          </div>
-                          <button
-                            className="rounded-md border border-slate-300 p-1 text-slate-600"
-                            onClick={() => {
-                              setCollapsedGroups((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(group.key)) next.delete(group.key);
-                                else next.add(group.key);
-                                return next;
-                              });
-                            }}
-                          >
-                            {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                          </button>
+                    {keywordUploading && <div className="text-xs text-slate-500">Uploading keywords...</div>}
+                    {keywordStatus && (
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded border border-slate-200 bg-slate-50 p-2">
+                          <div className="text-slate-500">Pages with keywords</div>
+                          <div className="text-lg font-semibold text-slate-900">{keywordStatus.pages_with_keywords}</div>
                         </div>
-                        {!collapsed && group.pages.map((page) => (
-                          <label key={page.id} className="flex items-center justify-between gap-3 border-t border-slate-100 px-3 py-2">
-                            <span className="flex min-w-0 items-center gap-2">
-                              <input type="checkbox" checked={selectedPageIds.has(page.id)} onChange={() => togglePage(page.id)} />
-                              <span className="truncate text-sm text-slate-700">{page.title || page.url}</span>
-                            </span>
-                            <span className="hidden max-w-xs shrink-0 truncate text-xs text-slate-500 md:block">{page.url}</span>
-                          </label>
-                        ))}
+                        <div className="rounded border border-slate-200 bg-slate-50 p-2">
+                          <div className="text-slate-500">Coverage</div>
+                          <div className="text-lg font-semibold text-slate-900">{keywordStatus.coverage_percent}%</div>
+                        </div>
                       </div>
-                    );
-                  })}
+                    )}
+                    {keywordUploadResult && (
+                      <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                        <div>Total rows: <strong>{keywordUploadResult.total_rows}</strong></div>
+                        <div>Matched pages: <strong>{keywordUploadResult.matched_pages}</strong></div>
+                        <div>Duplicates skipped: <strong>{keywordUploadResult.duplicates_skipped}</strong></div>
+                        {keywordUploadResult.unmatched_urls.length > 0 && (
+                          <div>Unmatched URLs: <strong>{keywordUploadResult.unmatched_urls.length}</strong></div>
+                        )}
+                        {keywordUploadResult.errors.length > 0 && (
+                          <div>Errors: <strong>{keywordUploadResult.errors.length}</strong></div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2 rounded-md border border-slate-200 bg-white p-3">
+                    <div className="text-xs font-semibold text-slate-700">Recent keyword entries</div>
+                    {keywordEntries.length === 0 ? (
+                      <div className="text-xs text-slate-500">No SEO keywords matched to this website yet.</div>
+                    ) : keywordEntries.map((entry) => (
+                      <div key={entry.url} className="rounded border border-slate-200 p-2 text-xs">
+                        <div className="truncate font-medium text-slate-800">{entry.url}</div>
+                        <div className="mt-1 line-clamp-2 text-slate-500">{entry.keywords}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
 
-            {step === 3 && (
+            {step === 4 && (
               <div className="space-y-4">
                 <div>
                   <h3 className="text-base font-semibold text-slate-900">Add board candidates</h3>
@@ -767,14 +1097,14 @@ export default function OnboardingModal({
                 <textarea
                   value={boardsText}
                   onChange={(e) => setBoardsText(e.target.value)}
-                  placeholder="Air Fryer Recipes&#10;Quick Dinners&#10;Easy Desserts"
+                  placeholder={'Air Fryer Recipes\nQuick Dinners\nEasy Desserts'}
                   className="min-h-[260px] w-full rounded-md border border-slate-300 p-3 text-sm"
                 />
                 <div className="text-sm text-slate-500">{boards.length} board candidate(s)</div>
               </div>
             )}
 
-            {step === 4 && (
+            {step === 5 && (
               <div className="space-y-4">
                 <div>
                   <h3 className="text-base font-semibold text-slate-900">Review first generation</h3>
@@ -796,6 +1126,16 @@ export default function OnboardingModal({
                   <div className="rounded-md border border-slate-200 p-3">
                     <div className="text-xs font-semibold uppercase text-slate-500">Boards</div>
                     <div className="mt-1 text-sm font-medium text-slate-900">{boards.length ? boards.slice(0, 3).join(', ') : 'General'}</div>
+                  </div>
+                  <div className="rounded-md border border-slate-200 p-3">
+                    <div className="text-xs font-semibold uppercase text-slate-500">Preview Images</div>
+                    <div className="mt-1 text-sm font-medium text-slate-900">{realPreviewImages.length} image(s) on sampled page</div>
+                  </div>
+                  <div className="rounded-md border border-slate-200 p-3">
+                    <div className="text-xs font-semibold uppercase text-slate-500">SEO Keywords</div>
+                    <div className="mt-1 text-sm font-medium text-slate-900">
+                      {keywordStatus ? `${keywordStatus.pages_with_keywords} page(s), ${keywordStatus.coverage_percent}% coverage` : 'Not loaded'}
+                    </div>
                   </div>
                 </div>
               </div>

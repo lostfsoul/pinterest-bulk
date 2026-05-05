@@ -39,6 +39,7 @@ type RightPanelProps = {
   onClearChanges: () => void;
   onSelectTemplate: (id: number) => void;
   onToggleTemplateSelection: (id: number) => void;
+  onDeleteTemplate?: (id: number) => void;
   scheduledDate: string | null;
   onChangeDate: (value: string | null) => void;
   activeFontFamily: string;
@@ -83,6 +84,7 @@ export default function RightPanel({
   onClearChanges,
   onSelectTemplate,
   onToggleTemplateSelection,
+  onDeleteTemplate,
   scheduledDate,
   onChangeDate,
   activeFontFamily,
@@ -188,10 +190,16 @@ export default function RightPanel({
                 onToggleTemplateSelection={onToggleTemplateSelection}
                 defaultTemplateId={defaultTemplateId}
                 onSetDefaultTemplate={onSetDefaultTemplate}
+                onDeleteTemplate={onDeleteTemplate}
                 titleScale={titleScale}
                 titlePaddingX={titlePaddingX}
                 lineHeightMultiplier={lineHeightMultiplier}
                 onResetTextSettings={onResetTextSettings}
+                previewImages={rendererImages}
+                previewTitle={previewTitle}
+                activeFontFamily={activeFontFamily}
+                activeFontFile={activeFontFile}
+                imageSettings={imageSettings}
               />
             </div>
           </div>

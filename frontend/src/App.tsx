@@ -279,25 +279,20 @@ function Layout({
         }}
       />
       {/* Mobile Header */}
-      <div className="lg:hidden fixed top-0 left-0 right-0 h-16 bg-white border-b border-slate-200 z-40 flex items-center justify-between px-4">
+      <div className="lg:hidden fixed top-0 left-0 right-0 min-h-16 bg-white border-b border-slate-200 z-40 flex items-center justify-between gap-2 px-3 py-2">
         <button
           onClick={() => setSidebarOpen(true)}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600"
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600"
         >
           <Menu className="h-5 w-5" />
         </button>
-        <div className="min-w-0 text-center px-2">
+        <div className="min-w-0 flex-1 px-1 text-center">
           <h1 className="text-sm font-semibold tracking-tight">Pinterest Tool</h1>
-          <div
-            className="mt-1 inline-flex h-8 max-w-full items-center gap-2 border border-slate-200 bg-slate-100 rounded-md px-3"
-          >
-            <span className="inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500" />
-            <span className="max-w-[220px] truncate text-xs font-medium">
-              {activeWebsiteDomain || activeWebsiteLabel}
-            </span>
+          <div className="mt-1 truncate text-xs font-medium text-slate-500">
+            {activeWebsiteDomain || activeWebsiteLabel}
           </div>
         </div>
-        <div className="w-10" />
+        <div className="w-9 shrink-0" />
       </div>
 
       {/* Sidebar Overlay (Mobile) */}
@@ -325,6 +320,29 @@ function Layout({
             </nav>
 
             <div className="pt-4 border-t border-slate-200 text-xs">
+              <div className="mb-4 space-y-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setSidebarOpen(false);
+                    navigate('/websites');
+                  }}
+                  className="w-full"
+                >
+                  Add Website
+                </Button>
+                <label className="block text-[11px] font-medium text-slate-500">Switch Website</label>
+                <select
+                  value={activeWebsiteId}
+                  onChange={(event) => handleWebsiteSwitch(event.target.value ? Number(event.target.value) : '')}
+                  className="w-full h-9 px-2 border border-slate-300 rounded-md text-xs bg-white"
+                >
+                  <option value="">Select Website</option>
+                  {websites.map((website) => (
+                    <option key={website.id} value={website.id}>{website.name}</option>
+                  ))}
+                </select>
+              </div>
               <button
                 onClick={() => {
                   void onLogout();

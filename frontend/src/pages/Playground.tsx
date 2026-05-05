@@ -414,6 +414,37 @@ export default function Playground() {
     }
   }
 
+  async function handleDeleteTemplate(templateId: number) {
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) return;
+    if (!window.confirm(`Delete template "${template.name}"?`)) return;
+    setStatus('Deleting template...');
+    try {
+      await apiClient.deleteTemplate(templateId);
+      const nextTemplates = await refreshTemplateList();
+      setState((prev) => {
+        const selectedTemplateIds = prev.selectedTemplateIds.filter((id) => id !== templateId);
+        const fallback = selectedTemplateIds[0] ?? nextTemplates[0]?.id ?? null;
+        const activeTemplateId = prev.activeTemplateId === templateId
+          ? fallback
+          : (nextTemplates.some((item) => item.id === prev.activeTemplateId) ? prev.activeTemplateId : fallback);
+        const defaultTemplateId = prev.defaultTemplateId === templateId
+          ? (selectedTemplateIds[0] ?? null)
+          : (selectedTemplateIds.includes(prev.defaultTemplateId || -1) ? prev.defaultTemplateId : selectedTemplateIds[0] ?? null);
+        return {
+          ...prev,
+          selectedTemplateIds,
+          activeTemplateId,
+          defaultTemplateId,
+          previewOpen: prev.previewOpen && Boolean(activeTemplateId),
+        };
+      });
+      setStatus('Template deleted.');
+    } catch (_error) {
+      setStatus('Failed to delete template.');
+    }
+  }
+
   function randomizeImages() {
     const sourceImages = currentPageImages;
     if (sourceImages.length <= 1) return;
@@ -498,8 +529,8 @@ export default function Playground() {
       </Card>
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_520px]">
-        <Card className="h-[calc(100vh-210px)]">
-          <CardContent className="h-full p-3 pt-3">
+        <Card className="h-auto xl:h-[calc(100vh-210px)]">
+          <CardContent className="max-h-none p-3 pt-3 xl:h-full xl:overflow-y-auto">
             <LeftPanel
               pages={pages}
               selectedPageUrl={state.selectedPageUrl}
@@ -553,8 +584,8 @@ export default function Playground() {
           </CardContent>
         </Card>
 
-        <Card className="hidden h-[calc(100vh-210px)] overflow-y-auto xl:block">
-          <CardContent className="pt-6">
+        <Card className="order-first h-auto overflow-y-auto xl:order-none xl:h-[calc(100vh-210px)]">
+          <CardContent className="p-3 xl:pt-6">
             <div className="flex items-center justify-between gap-2">
               <div className="text-sm font-medium text-slate-800">Template Preview</div>
               <div className="text-[10px] text-slate-500">{state.selectedTemplateIds.length} selected</div>
@@ -564,7 +595,7 @@ export default function Playground() {
               onClick={openPreviewModal}
               className="mx-auto mt-3 block w-full max-w-[430px] overflow-hidden rounded-md border border-slate-200 bg-slate-100 text-left"
             >
-              <div className="overflow-hidden">
+              <div className="max-h-[360px] overflow-hidden xl:max-h-none">
                 {activeTemplate ? (
                   <SvgRenderer
                     templatePath={activeTemplate.path}
@@ -578,7 +609,7 @@ export default function Playground() {
                     titlePaddingX={titlePaddingX}
                     lineHeightMultiplier={lineHeightMultiplier}
                     imageSettings={state.imageSettings}
-                    zoom={1}
+                    zoom={0.8}
                     className="w-full"
                   />
                 ) : (
@@ -629,6 +660,7 @@ export default function Playground() {
         onRandomize={randomizeImages}
         onClearChanges={clearChanges}
         onSelectTemplate={(id) => setState((prev) => ({ ...prev, activeTemplateId: id }))}
+        onDeleteTemplate={(id) => void handleDeleteTemplate(id)}
         onToggleTemplateSelection={(id) => setState((prev) => {
           const isSelected = prev.selectedTemplateIds.includes(id);
           const selectedTemplateIds = isSelected

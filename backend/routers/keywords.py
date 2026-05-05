@@ -106,11 +106,17 @@ def split_keywords(value: str) -> list[str]:
 @router.post("/upload", response_model=KeywordUploadResponse)
 async def upload_keywords_csv(
     file: UploadFile = File(...),
+    website_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
 ):
     """Upload keyword CSV file with columns: url, keywords."""
     if not file.filename.endswith((".csv", ".CSV")):
         raise HTTPException(status_code=400, detail="File must be a CSV")
+
+    if website_id is not None:
+        website = db.query(Website).filter(Website.id == website_id).first()
+        if not website:
+            raise HTTPException(status_code=404, detail="Website not found")
 
     content = await file.read()
     csv_text = content.decode("utf-8-sig")
@@ -124,7 +130,10 @@ async def upload_keywords_csv(
     if not url_col or not keywords_col:
         raise HTTPException(status_code=400, detail="CSV must have 'url' and 'keywords' columns")
 
-    pages = db.query(Page).all()
+    pages_query = db.query(Page)
+    if website_id is not None:
+        pages_query = pages_query.filter(Page.website_id == website_id)
+    pages = pages_query.all()
     url_to_page = {clean_url(page.url): page for page in pages}
 
     total_rows = 0
@@ -332,10 +341,30 @@ async def upload_trend_keywords_csv(
 
 
 @router.get("")
-def get_keywords_status(db: Session = Depends(get_db)) -> KeywordStatusResponse:
+def get_keywords_status(
+    website_id: int | None = Query(default=None, ge=1),
+    db: Session = Depends(get_db),
+) -> KeywordStatusResponse:
     """Get keyword status."""
-    total_pages = db.query(Page).count()
-    rows = db.query(SEOKeyword.keywords).all()
+    pages_query = db.query(Page)
+    if website_id is not None:
+        pages_query = pages_query.filter(Page.website_id == website_id)
+    pages = pages_query.all()
+    total_pages = len(pages)
+    page_urls = [page.url for page in pages]
+    if not page_urls:
+        return KeywordStatusResponse(
+            total_pages=0,
+            pages_with_keywords=0,
+            total_keywords=0,
+            coverage_percent=0,
+        )
+
+    rows = (
+        db.query(SEOKeyword.keywords)
+        .filter(SEOKeyword.url.in_(page_urls))
+        .all()
+    )
 
     pages_with_keywords = 0
     total_keywords = 0
