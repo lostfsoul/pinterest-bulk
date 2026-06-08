@@ -21,6 +21,7 @@ from services.workflow_service import (
     get_time_window_preview,
     has_active_generation_job,
     resolve_website_schedule_config,
+    WorkflowSetupError,
 )
 
 router = APIRouter()
@@ -72,6 +73,8 @@ def workflow_generate_next(
 
     try:
         payload = build_generation_payload(db, website)
+    except WorkflowSetupError as error:
+        raise HTTPException(status_code=400, detail=error.as_detail()) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

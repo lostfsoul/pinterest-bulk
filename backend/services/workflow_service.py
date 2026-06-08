@@ -30,6 +30,7 @@ DEFAULT_START_HOUR = 8
 DEFAULT_END_HOUR = 20
 ACTIVE_JOB_STALE_MINUTES = 20
 _FONT_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "fonts"
+_TEMPLATE_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "templates"
 _PRESET_FONT_MAP: dict[str, tuple[str, str]] = {
     "font_combo_1": ("Bebas Neue", "builtin/BebasNeue-Regular.ttf"),
     "font_combo_2": ("Montserrat", "builtin/Montserrat-Bold.ttf"),
@@ -38,6 +39,21 @@ _PRESET_FONT_MAP: dict[str, tuple[str, str]] = {
     "font_combo_5": ("Montserrat", "builtin/Montserrat-Regular.ttf"),
     "font_combo_6": ("Poppins", "builtin/Poppins-Regular.ttf"),
 }
+
+
+class WorkflowSetupError(ValueError):
+    def __init__(self, code: str, message: str, setup_section: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.setup_section = setup_section
+
+    def as_detail(self) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "setup_section": self.setup_section,
+        }
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -104,6 +120,66 @@ def _pick_template_id(db: Session, website: Website) -> int | None:
             if exists:
                 return template_id
     return None
+
+
+def _validate_template_file(db: Session, template_id: int) -> None:
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise WorkflowSetupError(
+            "template_not_configured",
+            "The selected template no longer exists. Choose or upload a template before generating.",
+            "design",
+        )
+    template_path = _TEMPLATE_STORAGE_ROOT / str(template.filename or "")
+    if not template.filename or not template_path.is_file():
+        raise WorkflowSetupError(
+            "template_file_missing",
+            f'The SVG file for template "{template.name}" is missing. Upload the template again before generating.',
+            "design",
+        )
+
+
+def _validate_font_file(db: Session, website: Website) -> None:
+    playground = _get_playground_settings(website)
+    font_set = str(playground.get("font_set") or "").strip()
+    if not font_set:
+        raise WorkflowSetupError(
+            "font_not_configured",
+            "No font is selected. Choose or upload a font before generating.",
+            "design",
+        )
+
+    if font_set.startswith("custom:"):
+        filename = font_set.split("custom:", 1)[1].strip()
+        custom = db.query(CustomFont).filter(CustomFont.filename == filename).first()
+        if not filename or not custom:
+            raise WorkflowSetupError(
+                "font_not_configured",
+                "The selected custom font no longer exists. Choose or upload a font before generating.",
+                "design",
+            )
+        if not (_FONT_STORAGE_ROOT / filename).is_file():
+            raise WorkflowSetupError(
+                "font_file_missing",
+                f'The file for custom font "{custom.family}" is missing. Upload the font again before generating.',
+                "design",
+            )
+        return
+
+    preset = _PRESET_FONT_MAP.get(font_set)
+    if not preset:
+        raise WorkflowSetupError(
+            "font_not_configured",
+            "The selected font is not available. Choose or upload a font before generating.",
+            "design",
+        )
+    family, filename = preset
+    if not (_FONT_STORAGE_ROOT / filename).is_file():
+        raise WorkflowSetupError(
+            "font_file_missing",
+            f'The file for font "{family}" is missing. Restore or upload the font before generating.',
+            "design",
+        )
 
 
 def _resolve_playground_render_settings(db: Session, website: Website) -> dict[str, Any]:
@@ -626,7 +702,13 @@ def expire_stale_generation_jobs(db: Session, website_id: int | None = None) -> 
 def build_generation_payload(db: Session, website: Website) -> dict[str, Any]:
     template_id = _pick_template_id(db, website)
     if not template_id:
-        raise ValueError("No template selected in Playground settings.")
+        raise WorkflowSetupError(
+            "template_not_configured",
+            "No template is selected. Choose or upload a template before generating.",
+            "design",
+        )
+    _validate_template_file(db, template_id)
+    _validate_font_file(db, website)
 
     enabled_page_ids = _enabled_page_ids(db, website.id)
     if not enabled_page_ids:

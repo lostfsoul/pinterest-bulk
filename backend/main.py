@@ -3,6 +3,7 @@ Main FastAPI application.
 """
 import asyncio
 import os
+import shutil
 from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +42,25 @@ def load_local_env() -> None:
 
 
 load_local_env()
+
+
+def ensure_builtin_fonts() -> int:
+    """Seed built-in fonts into persistent storage without replacing user files."""
+    source = Path(os.getenv("BUILTIN_FONT_SEED_DIR", "/app/builtin_fonts"))
+    if not source.is_dir():
+        return 0
+    destination = PROJECT_ROOT / "storage" / "fonts" / "builtin"
+    destination.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for font_path in source.iterdir():
+        if not font_path.is_file():
+            continue
+        target = destination / font_path.name
+        if target.exists():
+            continue
+        shutil.copy2(font_path, target)
+        copied += 1
+    return copied
 
 
 def validate_production_configuration() -> None:
@@ -90,6 +110,7 @@ def mark_interrupted_generation_jobs_failed(db: Session) -> int:
 async def lifespan(app: FastAPI):
     """Initialize database on startup."""
     validate_production_configuration()
+    ensure_builtin_fonts()
     init_db()
 
     # Ensure default schedule settings exist

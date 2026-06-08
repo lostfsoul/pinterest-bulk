@@ -7,6 +7,20 @@ import apiClient, {
   WorkflowTimeWindowPreviewResponse,
 } from '../services/api';
 import { Button } from './Button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
+
+type WorkflowSetupIssue = {
+  code: string;
+  message: string;
+  setup_section?: string;
+};
 
 type WorkflowForm = {
   daily_pin_count: number;
@@ -119,6 +133,7 @@ export default function WorkflowSettingsPanel() {
   const [timeWindowPreview, setTimeWindowPreview] = useState<WorkflowTimeWindowPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
+  const [setupIssue, setSetupIssue] = useState<WorkflowSetupIssue | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -418,7 +433,13 @@ export default function WorkflowSettingsPanel() {
       setStatus((response.data.message || `Generation job #${response.data.job_id} queued.`) + staleInfo);
       await refreshWorkflowStatus();
     } catch (error: unknown) {
-      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const detail = (error as { response?: { data?: { detail?: string | WorkflowSetupIssue } } })?.response?.data?.detail;
+      if (detail && typeof detail === 'object' && detail.setup_section) {
+        setSetupIssue(detail);
+        setStatus(detail.message);
+        return;
+      }
+      const detailMessage = typeof detail === 'string' ? detail : undefined;
       if ((error as { response?: { status?: number } })?.response?.status === 409) {
         try {
           const forced = await apiClient.generateWorkflowNextBatch(activeWebsiteId, true);
@@ -434,11 +455,11 @@ export default function WorkflowSettingsPanel() {
           return;
         } catch (forceError: unknown) {
           const forceDetail = (forceError as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-          setStatus(forceDetail || detail || 'Failed to start generation.');
+          setStatus(forceDetail || detailMessage || 'Failed to start generation.');
           return;
         }
       }
-      setStatus(detail || 'Failed to start generation.');
+      setStatus(detailMessage || 'Failed to start generation.');
     } finally {
       setRunning(false);
     }
@@ -450,6 +471,32 @@ export default function WorkflowSettingsPanel() {
 
   return (
     <div className="space-y-4">
+      <Dialog open={Boolean(setupIssue)} onOpenChange={(open) => !open && setSetupIssue(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Generation setup required</DialogTitle>
+            <DialogDescription>
+              {setupIssue?.message}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setSetupIssue(null)}>
+              Close
+            </Button>
+            <Button
+              onClick={() => {
+                if (!activeWebsiteId) return;
+                setSetupIssue(null);
+                window.dispatchEvent(new CustomEvent('open-onboarding', {
+                  detail: { websiteId: activeWebsiteId, step: 1 },
+                }));
+              }}
+            >
+              Open Design Setup
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-4">
         <div className="flex flex-wrap items-end gap-3">
           <div>

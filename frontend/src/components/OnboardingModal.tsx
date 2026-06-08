@@ -39,6 +39,7 @@ import {
 type OnboardingModalProps = {
   open: boolean;
   website: Website | null;
+  initialStep?: number;
   onOpenChange: (open: boolean) => void;
   onCompleted: () => void;
 };
@@ -153,6 +154,7 @@ export function shouldShowOnboarding(website: Website | null): boolean {
 export default function OnboardingModal({
   open,
   website,
+  initialStep,
   onOpenChange,
   onCompleted,
 }: OnboardingModalProps) {
@@ -182,8 +184,11 @@ export default function OnboardingModal({
   const [previewImagesLoading, setPreviewImagesLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [uploadingTemplate, setUploadingTemplate] = useState(false);
+  const [uploadingFont, setUploadingFont] = useState(false);
   const [templateUploadName, setTemplateUploadName] = useState('');
   const [templateUploadFile, setTemplateUploadFile] = useState<File | null>(null);
+  const [fontUploadFamily, setFontUploadFamily] = useState('');
+  const [fontUploadFile, setFontUploadFile] = useState<File | null>(null);
   const [boardsText, setBoardsText] = useState('');
   const [keywordUploading, setKeywordUploading] = useState(false);
   const [keywordUploadResult, setKeywordUploadResult] = useState<KeywordUploadResult | null>(null);
@@ -309,8 +314,9 @@ export default function OnboardingModal({
         );
 
         setSettings(nextSettings);
-        setStep(savedCurrentStep);
-        setMaxUnlockedStep(savedCurrentStep);
+        const requestedStep = initialStep == null ? savedCurrentStep : clampStep(initialStep);
+        setStep(requestedStep);
+        setMaxUnlockedStep(Math.max(savedCurrentStep, requestedStep));
         setMaxCompletedStep(savedCompletedStep);
         setSchedule(scheduleRes.data);
         setTemplates(templateItems);
@@ -354,7 +360,7 @@ export default function OnboardingModal({
     return () => {
       active = false;
     };
-  }, [open, website]);
+  }, [initialStep, open, website]);
 
   async function saveSettingsPatch(
     patch: Record<string, unknown>,
@@ -490,6 +496,34 @@ export default function OnboardingModal({
     } catch (error) {
       console.error('Failed to delete template:', error);
       setStatus('Failed to delete template.');
+    }
+  }
+
+  async function handleUploadFont() {
+    if (!fontUploadFile) {
+      setStatus('Choose a font file first.');
+      return;
+    }
+    setUploadingFont(true);
+    setStatus('Uploading font...');
+    try {
+      const uploaded = await apiClient.uploadTemplateFont(fontUploadFile, fontUploadFamily);
+      const fontsRes = await apiClient.getPlaygroundFonts();
+      const items = normalizeFontSets(fontsRes.data.filter((font) => (
+        String(font.id || '').startsWith('custom:')
+        || String(font.id || '').startsWith('font_combo_')
+      )));
+      const uploadedId = `custom:${uploaded.data.filename}`;
+      setFontSets(items);
+      setActiveFontSetId(items.some((font) => font.id === uploadedId) ? uploadedId : (items[0]?.id || ''));
+      setFontUploadFamily('');
+      setFontUploadFile(null);
+      setStatus('Font uploaded and selected.');
+    } catch (error) {
+      console.error('Failed to upload font:', error);
+      setStatus('Failed to upload font. Use TTF, OTF, WOFF, or WOFF2.');
+    } finally {
+      setUploadingFont(false);
     }
   }
 
@@ -737,9 +771,12 @@ export default function OnboardingModal({
       setStatus(response.data.message || 'First generation started.');
       onOpenChange(false);
     } catch (error: unknown) {
-      const detail = (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const detail = (error as {
+        response?: { data?: { detail?: string | { message?: string } } };
+      })?.response?.data?.detail;
+      const detailMessage = typeof detail === 'string' ? detail : detail?.message;
       console.error('Failed to start first generation:', error);
-      setStatus(detail || 'Failed to start first generation.');
+      setStatus(detailMessage || 'Failed to start first generation.');
     } finally {
       setGenerating(false);
     }
@@ -1042,6 +1079,32 @@ export default function OnboardingModal({
                           disabled={uploadingTemplate || !templateUploadName.trim() || !templateUploadFile}
                         >
                           {uploadingTemplate ? 'Uploading...' : 'Upload SVG Template'}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 p-3">
+                      <div className="text-xs font-semibold text-slate-700">Upload Font</div>
+                      <div className="mt-2 space-y-2">
+                        <input
+                          value={fontUploadFamily}
+                          onChange={(event) => setFontUploadFamily(event.target.value)}
+                          placeholder="Font family (optional)"
+                          className="h-9 w-full rounded-md border border-slate-300 px-2 text-sm"
+                        />
+                        <input
+                          type="file"
+                          accept=".ttf,.otf,.woff,.woff2"
+                          onChange={(event) => setFontUploadFile(event.target.files?.[0] || null)}
+                          className="block w-full text-xs text-slate-500 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-slate-700"
+                        />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-full"
+                          onClick={() => void handleUploadFont()}
+                          disabled={uploadingFont || !fontUploadFile}
+                        >
+                          {uploadingFont ? 'Uploading...' : 'Upload Font'}
                         </Button>
                       </div>
                     </div>

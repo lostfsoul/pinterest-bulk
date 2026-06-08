@@ -65,6 +65,7 @@ COPY backend/requirements.txt /app/backend/requirements.txt
 RUN python3 -m pip install --no-cache-dir --break-system-packages -r /app/backend/requirements.txt
 
 COPY backend /app/backend
+COPY storage/fonts/builtin /app/builtin_fonts
 COPY --from=frontend-build /app/frontend/dist /app/backend/static
 COPY --from=renderer-build /app/backend/node_renderer /app/backend/node_renderer
 
@@ -76,7 +77,8 @@ RUN mkdir -p \
     /app/storage/templates \
     /app/storage/images \
     /app/storage/exports \
-    /app/storage/backups
+    /app/storage/backups \
+    /app/storage/fonts
 
 EXPOSE 8000
 

@@ -698,6 +698,8 @@ def list_font_sets(db: Session) -> list[dict[str, str]]:
         .all()
     )
     for font in custom_fonts:
+        if not (_FONT_STORAGE_ROOT / font.filename).is_file():
+            continue
         presets.append(
             {
                 "id": f"custom:{font.filename}",

@@ -92,6 +92,7 @@ function Layout({
     return stored ? Number(stored) : null;
   });
   const [onboardingWebsiteId, setOnboardingWebsiteId] = useState<number | null>(null);
+  const [onboardingInitialStep, setOnboardingInitialStep] = useState<number | undefined>(undefined);
 
   async function loadWebsitesForLayout(preferredWebsiteId?: number | null) {
     const stored = localStorage.getItem('active_website_id');
@@ -136,9 +137,12 @@ function Layout({
 
   useEffect(() => {
     const onOpenOnboarding = (event: Event) => {
-      const custom = event as CustomEvent<number>;
-      if (!custom.detail) return;
-      setOnboardingWebsiteId(custom.detail);
+      const custom = event as CustomEvent<number | { websiteId: number; step?: number }>;
+      const websiteId = typeof custom.detail === 'number' ? custom.detail : custom.detail?.websiteId;
+      const initialStep = typeof custom.detail === 'number' ? undefined : custom.detail?.step;
+      if (!websiteId) return;
+      setOnboardingInitialStep(initialStep);
+      setOnboardingWebsiteId(websiteId);
     };
     window.addEventListener('open-onboarding', onOpenOnboarding as EventListener);
     return () => window.removeEventListener('open-onboarding', onOpenOnboarding as EventListener);
@@ -270,12 +274,15 @@ function Layout({
       <OnboardingModal
         open={Boolean(onboardingWebsite)}
         website={onboardingWebsite}
+        initialStep={onboardingInitialStep}
         onOpenChange={(open) => {
           if (open || !onboardingWebsiteId) return;
           setOnboardingWebsiteId(null);
+          setOnboardingInitialStep(undefined);
         }}
         onCompleted={() => {
           setOnboardingWebsiteId(null);
+          setOnboardingInitialStep(undefined);
           void loadWebsitesForLayout(activeWebsiteId || null);
         }}
       />
