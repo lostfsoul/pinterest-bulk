@@ -841,6 +841,20 @@ export const apiClient = {
   getPlaceholderInfo: () => api.get<PlaceholderInfo>('/ai-presets/placeholders'),
   listAIModels: () => api.get<{ models: AIModelInfo[] }>('/ai-presets/models'),
 
+  // Unlinked super admin maintenance
+  verifySuperAdmin: (password: string) =>
+    api.post<{ message: string }>('/super-admin/verify', { password }),
+  deleteAllSvgs: (password: string) =>
+    api.post<{ message: string; deleted_records: number; deleted_files: number }>(
+      '/super-admin/delete-svgs',
+      { password },
+    ),
+  clearDatabase: (password: string) =>
+    api.post<{ message: string; deleted_records: number; deleted_files: number }>(
+      '/super-admin/clear-database',
+      { password },
+    ),
+
 };
 
 export default apiClient;

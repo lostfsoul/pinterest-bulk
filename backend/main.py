@@ -151,6 +151,7 @@ from routers import (
     workflow,
     export,
     ai_presets,
+    super_admin,
 )
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
@@ -164,6 +165,7 @@ app.include_router(schedule.router, prefix="/api/schedule", tags=["schedule"])
 app.include_router(workflow.router, prefix="/api/workflow", tags=["workflow"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(ai_presets.router, prefix="/api/ai-presets", tags=["ai-presets"])
+app.include_router(super_admin.router, prefix="/api/super-admin", tags=["super-admin"])
 
 
 # =============================================================================

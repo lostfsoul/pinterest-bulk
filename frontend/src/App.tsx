@@ -25,6 +25,7 @@ const Pages = lazy(() => import('./pages/Pages'));
 const Export = lazy(() => import('./pages/Export'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Login = lazy(() => import('./pages/Login'));
+const SuperAdmin = lazy(() => import('./pages/SuperAdmin'));
 
 function NavItem({ to, children, onClick }: { to: string; children: React.ReactNode; onClick?: () => void }) {
   const location = useLocation();
@@ -565,6 +566,7 @@ function App() {
           <Route path="/playground" element={<Playground />} />
           <Route path="/export" element={<Export />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/super-admin" element={<SuperAdmin />} />
           <Route path="/ai-settings" element={<Navigate to="/settings" replace />} />
           <Route path="/keywords" element={<Navigate to="/settings" replace />} />
           <Route path="/templates" element={<Navigate to="/settings" replace />} />
