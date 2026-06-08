@@ -30,8 +30,8 @@ function toneForMatchCount(count: number): string {
 }
 
 function toneForScore(score: number): string {
-  if (score >= 1.5) return 'text-emerald-700';
-  if (score >= 0.8) return 'text-amber-700';
+  if (score >= 1.2) return 'text-emerald-700';
+  if (score >= 0.7) return 'text-amber-700';
   return 'text-slate-500';
 }
 
@@ -155,7 +155,6 @@ export default function Keywords() {
       const response = await apiClient.getTrendKeywordMatchPreview({
         website_id: activeWebsiteId,
         pages_per_keyword: 5,
-        min_score: 0.2,
       });
       setTrendMatchPreview(response.data.items || []);
     } catch (error) {
@@ -290,7 +289,7 @@ export default function Keywords() {
       'keyword,period_type,period_value,weight',
       '"summer salad ideas",season,summer,1.4',
       '"back to school lunch",month,august,2.0',
-      '"easy dinner recipes",always,,1.0',
+      '"cozy soup recipes",season,winter,1.2',
     ].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -408,7 +407,7 @@ export default function Keywords() {
             <strong>CSV headers:</strong> <code>keyword,period_type,period_value,weight</code>
           </p>
           <p className="text-xs text-gray-500 mb-2">
-            `period_type`: always | month | season. `period_value` needed only for month/season.
+            `period_type`: month | season. Evergreen is automatic, so no always row is needed.
           </p>
           <button
             onClick={downloadTrendTemplate}
@@ -494,7 +493,7 @@ export default function Keywords() {
             </Button>
           </div>
           <p className="mb-3 text-xs text-gray-500">
-            Each keyword shows top matching enabled pages. Red means no current matches.
+            Matches use article titles only. A valid trend match needs at least two words from the keyword phrase; SEO keywords are used later for generated pin copy.
           </p>
           {loadingTrendPreview ? (
             <div className="text-sm text-gray-500">Loading trend matches...</div>
@@ -510,6 +509,11 @@ export default function Keywords() {
                     <div className="space-y-1">
                       <div className="font-medium text-slate-900">{item.keyword}</div>
                       <div className="flex items-center gap-2">
+                        {item.period_type && (
+                          <span className="rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                            {item.period_type}{item.period_value ? `: ${item.period_value}` : ''}
+                          </span>
+                        )}
                         <span className="rounded-md border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700">
                           Weight {item.weight}
                         </span>
@@ -557,7 +561,7 @@ export default function Keywords() {
             <h2 className="text-lg font-semibold text-gray-900">SEO Keywords</h2>
             <p className="text-sm text-gray-500 mt-1">
               {activeWebsite
-                ? `Showing keywords for: ${activeWebsite.name}`
+                ? `Showing content-generation keywords for: ${activeWebsite.name}`
                 : 'No website selected. Select a website from the sidebar.'}
             </p>
           </div>

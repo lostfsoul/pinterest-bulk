@@ -15,6 +15,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from './ui/dialog';
@@ -134,6 +135,15 @@ function usableImages(images: PageImage[]): PageImage[] {
   return images.filter((image) => !image.is_excluded && !image.excluded_by_global_rule);
 }
 
+function numberFromSetting(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clampStep(value: unknown): number {
+  return clamp(numberFromSetting(value, 0), 0, STEPS.length - 1);
+}
+
 export function shouldShowOnboarding(website: Website | null): boolean {
   if (!website?.generation_settings) return false;
   const onboarding = asRecord(website.generation_settings.onboarding);
@@ -147,9 +157,12 @@ export default function OnboardingModal({
   onCompleted,
 }: OnboardingModalProps) {
   const [step, setStep] = useState(0);
+  const [maxUnlockedStep, setMaxUnlockedStep] = useState(0);
+  const [maxCompletedStep, setMaxCompletedStep] = useState(-1);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [confirmSkipOpen, setConfirmSkipOpen] = useState(false);
   const [status, setStatus] = useState('');
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [schedule, setSchedule] = useState<ScheduleSettings | null>(null);
@@ -261,6 +274,7 @@ export default function OnboardingModal({
         if (!active) return;
 
         const nextSettings = settingsRes.data.settings || {};
+        const onboarding = asRecord(nextSettings.onboarding);
         const generation = asRecord(nextSettings.generation);
         const ai = asRecord(nextSettings.ai);
         const playground = await apiClient.getPlaygroundSettings(website.id).catch(() => null);
@@ -287,7 +301,17 @@ export default function OnboardingModal({
         const previewCandidates = pageItems.filter((page) => enabledIds.has(page.id));
         const previewIndex = previewCandidates.length > 0 ? Math.floor(Math.random() * previewCandidates.length) : 0;
 
+        const savedCurrentStep = clampStep(onboarding.current_step);
+        const savedCompletedStep = clamp(
+          numberFromSetting(onboarding.max_completed_step, savedCurrentStep - 1),
+          -1,
+          STEPS.length - 1,
+        );
+
         setSettings(nextSettings);
+        setStep(savedCurrentStep);
+        setMaxUnlockedStep(savedCurrentStep);
+        setMaxCompletedStep(savedCompletedStep);
         setSchedule(scheduleRes.data);
         setTemplates(templateItems);
         setFontSets(filteredFonts);
@@ -341,6 +365,43 @@ export default function OnboardingModal({
     await apiClient.updateWebsiteGenerationSettings(website.id, next);
     setSettings(next);
     return next;
+  }
+
+  function buildStepCompletionPatch(stepIndex: number, baseSettings: Record<string, unknown> = settings) {
+    const onboarding = asRecord(baseSettings.onboarding);
+    const completedSteps = asRecord(onboarding.completed_steps);
+    const currentStep = clampStep(onboarding.current_step);
+    const completedStep = clamp(
+      numberFromSetting(onboarding.max_completed_step, currentStep - 1),
+      -1,
+      STEPS.length - 1,
+    );
+    const nextCurrentStep = Math.max(currentStep, Math.min(STEPS.length - 1, stepIndex + 1));
+    const nextCompletedStep = Math.max(completedStep, stepIndex);
+    return {
+      current_step: nextCurrentStep,
+      max_completed_step: nextCompletedStep,
+      completed_steps: {
+        ...completedSteps,
+        [String(stepIndex)]: {
+          completed: true,
+          completed_at: new Date().toISOString(),
+        },
+      },
+    };
+  }
+
+  async function saveCompletedStep(stepIndex: number, patch: Record<string, unknown> = {}) {
+    const onboardingPatch = buildStepCompletionPatch(stepIndex);
+    const next = await saveSettingsPatch(mergeRecords(patch, { onboarding: onboardingPatch }));
+    setMaxUnlockedStep(clampStep(onboardingPatch.current_step));
+    setMaxCompletedStep(clamp(numberFromSetting(onboardingPatch.max_completed_step, stepIndex), -1, STEPS.length - 1));
+    return next;
+  }
+
+  function goToStep(index: number) {
+    if (index > maxUnlockedStep) return;
+    setStep(index);
   }
 
   async function loadPreviewPageImages(pageId: number, scrapeIfEmpty: boolean) {
@@ -491,7 +552,7 @@ export default function OnboardingModal({
         setPreviewPageId(selectedIds[0] ?? null);
       }
     }
-    await saveSettingsPatch({ onboarding: { current_step: 1 } });
+    await saveCompletedStep(0);
     return true;
   }
 
@@ -519,16 +580,15 @@ export default function OnboardingModal({
       advanced_settings: current?.advanced_settings || {},
     };
     await apiClient.savePlaygroundSettings(website.id, payload);
-    await saveSettingsPatch({
+    await saveCompletedStep(1, {
       design: { template_ids: selected },
-      onboarding: { current_step: 2 },
     });
     return true;
   }
 
   async function saveWorkflowStep() {
     if (!website || !schedule) return false;
-    await saveSettingsPatch({
+    await saveCompletedStep(2, {
       generation: {
         daily_pin_count: workflow.daily_pin_count,
         scheduling_window_days: workflow.scheduling_window_days,
@@ -539,7 +599,6 @@ export default function OnboardingModal({
         randomize_posting_times: workflow.randomize_posting_times,
         max_floating_minutes: workflow.max_floating_minutes,
       },
-      onboarding: { current_step: 3 },
     });
     await apiClient.updateScheduleSettings({
       pins_per_day: workflow.daily_pin_count,
@@ -580,14 +639,13 @@ export default function OnboardingModal({
   }
 
   async function saveSeoStep() {
-    await saveSettingsPatch({ onboarding: { current_step: 4 } });
+    await saveCompletedStep(3);
     return true;
   }
 
   async function saveBoardsStep() {
-    await saveSettingsPatch({
+    await saveCompletedStep(4, {
       ai: { board_candidates: boards },
-      onboarding: { current_step: 5 },
     });
     return true;
   }
@@ -598,10 +656,42 @@ export default function OnboardingModal({
       onboarding: {
         required: true,
         completed: true,
+        dismissed: false,
         completed_at: new Date().toISOString(),
+        current_step: STEPS.length - 1,
+        max_completed_step: STEPS.length - 1,
       },
     }, baseSettings);
     onCompleted();
+  }
+
+  async function dismissOnboarding() {
+    if (!website) {
+      onOpenChange(false);
+      return;
+    }
+    setSaving(true);
+    setStatus('');
+    try {
+      await saveSettingsPatch({
+        onboarding: {
+          required: false,
+          completed: true,
+          dismissed: true,
+          dismissed_at: new Date().toISOString(),
+          current_step: step,
+          max_completed_step: maxCompletedStep,
+        },
+      });
+      setConfirmSkipOpen(false);
+      onCompleted();
+      onOpenChange(false);
+    } catch (error) {
+      console.error('Failed to dismiss onboarding:', error);
+      setStatus('Failed to save setup dismissal.');
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function nextStep() {
@@ -615,7 +705,14 @@ export default function OnboardingModal({
               : step === 3 ? await saveSeoStep()
                 : step === 4 ? await saveBoardsStep()
                 : true;
-      if (ok) setStep((prev) => Math.min(STEPS.length - 1, prev + 1));
+      if (ok) {
+        setStep((prev) => {
+          const next = Math.min(STEPS.length - 1, prev + 1);
+          setMaxUnlockedStep((current) => Math.max(current, next));
+          setMaxCompletedStep((current) => Math.max(current, prev));
+          return next;
+        });
+      }
     } catch (error) {
       console.error('Failed to save onboarding step:', error);
       setStatus('Failed to save this step.');
@@ -681,14 +778,15 @@ export default function OnboardingModal({
         : true;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
-        <DialogHeader>
-          <DialogTitle>Onboarding</DialogTitle>
-          <DialogDescription>
-            Set up {website?.name || 'this website'} for its first pin generation.
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
+          <DialogHeader>
+            <DialogTitle>Onboarding</DialogTitle>
+            <DialogDescription>
+              Set up {website?.name || 'this website'} for its first pin generation.
+            </DialogDescription>
+          </DialogHeader>
 
         <div className="relative mb-2 grid grid-cols-3 gap-2 border-b border-slate-200 pb-5 md:grid-cols-6">
           <div className="absolute left-8 right-8 top-4 h-0.5 bg-slate-200" />
@@ -698,13 +796,17 @@ export default function OnboardingModal({
           />
           {STEPS.map((item, index) => {
             const active = index === step;
-            const done = index < step;
+            const done = index <= maxCompletedStep;
+            const locked = index > maxUnlockedStep;
             return (
               <button
                 key={item.title}
                 type="button"
-                className="relative z-10 flex flex-col items-center gap-1 text-center"
-                onClick={() => setStep(index)}
+                disabled={locked || saving || generating}
+                className={`relative z-10 flex flex-col items-center gap-1 text-center ${
+                  locked ? 'cursor-not-allowed opacity-45' : 'cursor-pointer'
+                }`}
+                onClick={() => goToStep(index)}
               >
                 <span className={`flex h-9 w-9 items-center justify-center rounded-full border text-sm font-bold ${
                   done || active ? 'border-pink-600 bg-pink-600 text-white' : 'border-slate-300 bg-slate-800 text-slate-300'
@@ -1150,8 +1252,8 @@ export default function OnboardingModal({
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-4">
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving || generating}>
-            Close for now
+          <Button variant="ghost" onClick={() => setConfirmSkipOpen(true)} disabled={saving || generating}>
+            Skip Setup
           </Button>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => setStep((prev) => Math.max(0, prev - 1))} disabled={step === 0 || saving || generating}>
@@ -1168,7 +1270,27 @@ export default function OnboardingModal({
             )}
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmSkipOpen} onOpenChange={setConfirmSkipOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Skip onboarding setup?</DialogTitle>
+            <DialogDescription>
+              You can reopen onboarding later from the website list, but generation may fail until pages, templates, and images are configured.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmSkipOpen(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button onClick={() => void dismissOnboarding()} disabled={saving}>
+              {saving ? 'Saving...' : 'Skip Setup'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

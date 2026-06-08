@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 
 from database import SessionLocal
-from models import Website
+from models import GenerationJob, Website
 from routers.pins import run_generation_job
 from services.workflow_service import (
     build_generation_payload,
@@ -23,7 +23,12 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         db = SessionLocal()
         try:
-            websites = db.query(Website).all()
+            active_job = (
+                db.query(GenerationJob.id)
+                .filter(GenerationJob.status.in_(["queued", "running"]))
+                .first()
+            )
+            websites = [] if active_job else db.query(Website).all()
             for website in websites:
                 try:
                     status = get_workflow_status(db, website)
@@ -34,6 +39,7 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
                         continue
                     job = create_generation_job(db, website.id, payload, reason="auto_scheduler")
                     asyncio.create_task(asyncio.to_thread(run_generation_job, job.id))
+                    break
                 except Exception:
                     # Keep scheduler loop alive for other websites.
                     continue

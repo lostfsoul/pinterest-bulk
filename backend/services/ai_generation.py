@@ -292,11 +292,18 @@ def generate_description(
         return generate_with_preset(preset, context)
 
     # Fallback: simple concatenation
+    title = clean_whitespace(page_title)
+    keyword_list = normalize_keywords(keywords, 5)
+    if title and keyword_list:
+        return f"{title} with ideas for {', '.join(keyword_list[:3])}. Read more at the link below."
+    if title:
+        return f"{title}. Read more at the link below."
+    if keyword_list:
+        return f"Explore ideas for {', '.join(keyword_list[:3])}. Read more at the link below."
+
     parts = []
     if page_title:
         parts.append(page_title)
-    if keywords:
-        parts.append(f"Keywords: {', '.join(normalize_keywords(keywords, 5))}")
     if url:
         parts.append("Read more at the link below.")
     return "\n\n".join(parts) if parts else None

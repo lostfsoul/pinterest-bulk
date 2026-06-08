@@ -67,13 +67,14 @@ def is_request_authenticated(request: Request) -> bool:
 
 def set_auth_cookie(response: Response, request: Request) -> None:
     """Attach the long-lived auth cookie to the response."""
+    production_mode = os.getenv("PRODUCTION_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
         value=build_auth_cookie(),
         max_age=AUTH_COOKIE_MAX_AGE,
         httponly=True,
         samesite="lax",
-        secure=request.url.scheme == "https",
+        secure=production_mode or request.url.scheme == "https",
         path="/",
     )
 

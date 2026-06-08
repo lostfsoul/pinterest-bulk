@@ -31,7 +31,10 @@ export default function PinMetadata({ metadata, images, scheduledDate, onChangeD
       <Row label="Board to Pin" value={metadata?.board || ''} />
       <Row label="Date To Publish" value={scheduledDate || 'Not scheduled'} />
       <div className="space-y-1.5">
-        <div className="text-xs font-medium text-slate-600">Images</div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-medium text-slate-600">Available Images</div>
+          <div className="text-[10px] text-slate-500">{visibleImages.length} found</div>
+        </div>
         <div className="rounded-md border border-slate-200 bg-slate-50 p-2">
           {visibleImages.length > 0 ? (
             <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 md:grid-cols-8">

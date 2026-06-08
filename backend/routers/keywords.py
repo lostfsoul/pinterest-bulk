@@ -21,10 +21,8 @@ from schemas import (
 )
 from services.sitemap import clean_url
 from services.trend_ranking import (
-    _build_page_ranking_text,
     _collect_active_trends,
-    _score_lexical,
-    _tokenize,
+    score_title_against_trends,
 )
 
 router = APIRouter()
@@ -92,7 +90,7 @@ def split_keywords(value: str) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
     for item in value.split(","):
-        keyword = item.strip()
+        keyword = re.sub(r"\s+", " ", item.strip())
         if not keyword:
             continue
         key = keyword.casefold()
@@ -471,35 +469,25 @@ def get_trend_match_preview(
     if not pages:
         return {"website_id": website_id, "items": []}
 
-    seo_rows = db.query(SEOKeyword.url, SEOKeyword.keywords).filter(
-        SEOKeyword.url.in_([page.url for page in pages])
-    ).all()
-    seo_map = {
-        row.url: split_keywords(row.keywords or "")
-        for row in seo_rows
-    }
-
     trend_rows = (
         db.query(WebsiteTrendKeyword)
         .filter(WebsiteTrendKeyword.website_id == website_id)
         .order_by(WebsiteTrendKeyword.created_at.desc(), WebsiteTrendKeyword.id.desc())
         .all()
     )
-    active_trends = _collect_active_trends(trend_rows)
+    active_trends = [
+        *_collect_active_trends(trend_rows, period_type="month"),
+        *_collect_active_trends(trend_rows, period_type="season"),
+    ]
     if not active_trends:
         return {"website_id": website_id, "items": []}
-
-    page_vectors = []
-    for page in pages:
-        text = _build_page_ranking_text(page, seo_map.get(page.url, []))
-        page_vectors.append((page, text, _tokenize(text)))
 
     items: list[dict] = []
     for trend in active_trends:
         matched_pages: list[dict] = []
-        for page, text, tokens in page_vectors:
-            score, _ = _score_lexical(text, tokens, [trend])
-            if score < float(min_score):
+        for page in pages:
+            score, _, matched_words = score_title_against_trends(page.title, [trend])
+            if score <= 0:
                 continue
             matched_pages.append(
                 {
@@ -507,6 +495,7 @@ def get_trend_match_preview(
                     "url": page.url,
                     "title": page.title or page.url,
                     "score": round(float(score), 4),
+                    "matched_words": matched_words,
                 }
             )
 
@@ -514,11 +503,13 @@ def get_trend_match_preview(
         items.append(
             {
                 "keyword": trend.keyword,
+                "period_type": trend.period_type,
+                "period_value": trend.period_value,
                 "weight": round(float(trend.weight), 4),
                 "matched_count": len(matched_pages),
                 "matched_pages": matched_pages[:pages_per_keyword],
             }
         )
 
-    items.sort(key=lambda row: (-row["matched_count"], row["keyword"]))
+    items.sort(key=lambda row: (0 if row["period_type"] == "month" else 1, -row["matched_count"], row["keyword"]))
     return {"website_id": website_id, "items": items}

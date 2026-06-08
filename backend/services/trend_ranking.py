@@ -3,12 +3,10 @@ Trend keyword ranking for page selection.
 """
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Iterable
-from urllib.parse import urlparse
 
 from models import Page, WebsiteTrendKeyword
 
@@ -35,6 +33,8 @@ class ActiveTrendKeyword:
     normalized_keyword: str
     tokens: set[str]
     weight: float
+    period_type: str
+    period_value: str | None
 
 
 @dataclass
@@ -46,6 +46,8 @@ class RankedPageEntry:
     score: float
     lexical_score: float
     matched_keywords: list[str]
+    priority_bucket: str
+    matched_words: list[str]
 
 
 def _normalize_text(value: str | None) -> str:
@@ -54,42 +56,40 @@ def _normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _normalize_token(token: str) -> str:
+    """Normalize lightweight plural variants for title/keyword matching."""
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
 def _tokenize(value: str | None) -> set[str]:
-    return {token for token in _normalize_text(value).split() if token}
-
-
-def _slug_from_url(url: str | None) -> str:
-    if not url:
-        return ""
-    try:
-        parsed = urlparse(url)
-        slug = parsed.path.rstrip("/").split("/")[-1]
-        return _normalize_text(slug)
-    except Exception:
-        return _normalize_text(url)
+    return {_normalize_token(token) for token in _normalize_text(value).split() if token}
 
 
 def _derive_active_period(now: datetime | None = None) -> tuple[str, str | None]:
-    moment = now or datetime.utcnow()
+    moment = now or datetime.now(UTC)
     active_month = moment.strftime("%B").lower()
     active_season = SEASON_BY_MONTH.get(active_month)
     return active_month, active_season
 
 
-def _build_page_ranking_text(page: Page, seo_keywords: list[str]) -> str:
-    parts = [
-        _normalize_text(page.title),
-        _normalize_text(page.section),
-        _slug_from_url(page.url),
-        _normalize_text(" ".join(seo_keywords)),
-    ]
-    return " ".join(part for part in parts if part).strip()
+def _build_page_ranking_text(page: Page, seo_keywords: list[str] | None = None) -> str:
+    """Return the text used for trend matching.
+
+    Trend scheduling intentionally uses article titles only. SEO keywords are
+    content-generation hints and must not create seasonal/month matches.
+    """
+    return _normalize_text(page.title)
 
 
 def _collect_active_trends(
     trend_rows: Iterable[WebsiteTrendKeyword],
     *,
     now: datetime | None = None,
+    period_type: str | None = None,
 ) -> list[ActiveTrendKeyword]:
     active_month, active_season = _derive_active_period(now)
     active: list[ActiveTrendKeyword] = []
@@ -97,13 +97,15 @@ def _collect_active_trends(
         keyword = (row.keyword or "").strip()
         if not keyword:
             continue
-        period_type = (row.period_type or "always").strip().lower()
+        row_period_type = (row.period_type or "always").strip().lower()
         period_value = (row.period_value or "").strip().lower()
+        if period_type is not None and row_period_type != period_type:
+            continue
 
-        is_active = period_type == "always"
-        if period_type == "month":
+        is_active = False
+        if row_period_type == "month":
             is_active = period_value == active_month
-        elif period_type == "season":
+        elif row_period_type == "season":
             is_active = bool(active_season and period_value == active_season)
 
         if not is_active:
@@ -119,88 +121,56 @@ def _collect_active_trends(
                 normalized_keyword=normalized_keyword,
                 tokens=tokens,
                 weight=max(0.0, weight),
+                period_type=row_period_type,
+                period_value=period_value or None,
             )
         )
     return active
 
 
-def _score_lexical(page_text: str, page_tokens: set[str], trends: list[ActiveTrendKeyword]) -> tuple[float, list[str]]:
+def _score_lexical(
+    page_text: str,
+    page_tokens: set[str],
+    trends: list[ActiveTrendKeyword],
+) -> tuple[float, list[str]]:
+    """Score valid phrase matches against a title token set.
+
+    A single shared word is intentionally rejected. A full phrase/token match is
+    stronger than a two-word partial match, and trend weight is the multiplier.
+    """
     if not trends:
         return 0.0, []
 
-    total_weight = 0.0
-    weighted_score = 0.0
+    best_score = 0.0
     matched_keywords: list[str] = []
     for trend in trends:
         if trend.weight <= 0:
             continue
-        total_weight += trend.weight
         overlap = len(page_tokens & trend.tokens)
-        overlap_ratio = overlap / max(1, len(trend.tokens))
-        exact_bonus = 1.0 if trend.normalized_keyword in page_text else 0.0
-        local_score = max(overlap_ratio, exact_bonus)
+        if overlap < min(2, len(trend.tokens)):
+            continue
+        coverage = overlap / max(1, len(trend.tokens))
+        exact_bonus = 0.25 if trend.normalized_keyword in page_text else 0.0
+        local_score = (coverage + exact_bonus) * trend.weight
         if local_score > 0:
             matched_keywords.append(trend.keyword)
-        weighted_score += trend.weight * local_score
+            best_score = max(best_score, local_score)
 
-    if total_weight <= 0:
-        return 0.0, []
-    return weighted_score / total_weight, matched_keywords
+    return best_score, matched_keywords
 
 
-def _score_semantic(
-    entries: list[RankedPageEntry],
+def score_title_against_trends(
+    title: str | None,
     trends: list[ActiveTrendKeyword],
-    *,
-    enabled: bool,
-) -> dict[int, float]:
-    if not enabled or not trends or not entries:
-        return {}
-
-    # Placeholder hook for future embedding integration.
-    provider = (os.getenv("TREND_SEMANTIC_PROVIDER", "") or "").strip().lower()
-    if provider not in {"openai", "local"}:
-        return {}
-
-    return {}
-
-
-def _jaccard_similarity(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    union = len(a | b)
-    if union == 0:
-        return 0.0
-    return len(a & b) / union
-
-
-def _select_with_diversity(
-    ranked_entries: list[RankedPageEntry],
-    *,
-    top_n: int,
-    diversity_penalty: float,
-) -> list[RankedPageEntry]:
-    if top_n <= 0 or not ranked_entries:
-        return []
-
-    selected: list[RankedPageEntry] = []
-    remaining = ranked_entries[:]
-    while remaining and len(selected) < top_n:
-        best_index = 0
-        best_adjusted = -1.0
-        for index, entry in enumerate(remaining):
-            similarity_penalty = 0.0
-            if selected:
-                similarity_penalty = max(
-                    _jaccard_similarity(entry.tokens, chosen.tokens)
-                    for chosen in selected
-                )
-            adjusted = entry.score - (diversity_penalty * similarity_penalty)
-            if adjusted > best_adjusted:
-                best_adjusted = adjusted
-                best_index = index
-        selected.append(remaining.pop(best_index))
-    return selected
+) -> tuple[float, list[str], list[str]]:
+    page_text = _normalize_text(title)
+    page_tokens = _tokenize(page_text)
+    score, matched_keywords = _score_lexical(page_text, page_tokens, trends)
+    matched_words: set[str] = set()
+    for trend in trends:
+        if trend.keyword in matched_keywords:
+            matched_words.update(page_tokens & trend.tokens)
+    return score, matched_keywords, sorted(matched_words)
 
 
 def _read_website_trend_settings(settings: dict | None) -> dict:
@@ -224,18 +194,26 @@ def rank_pages_for_trends(
     diversity_penalty_override: float | None = None,
     semantic_enabled_override: bool | None = None,
 ) -> tuple[list[Page], dict]:
-    """Rank and select pages based on active trend keywords."""
+    """Rank pages by month, season, then evergreen fallback.
+
+    SEO keywords and URL data are deliberately ignored for matching so uploaded
+    SEO hints cannot force a page into a seasonal trend bucket.
+    """
     if not pages:
         return [], {"ranking_applied": False, "reason": "no_pages"}
 
-    active_trends_by_website: dict[int, list[ActiveTrendKeyword]] = {}
+    month_trends_by_website: dict[int, list[ActiveTrendKeyword]] = {}
+    season_trends_by_website: dict[int, list[ActiveTrendKeyword]] = {}
     any_active_trends = False
     for website_id in {page.website_id for page in pages}:
         trend_settings = _read_website_trend_settings(generation_settings_by_website.get(website_id, {}))
         website_enabled = bool(trend_settings.get("enabled", True))
-        active = _collect_active_trends(trend_keywords_by_website.get(website_id, [])) if website_enabled else []
-        active_trends_by_website[website_id] = active
-        if active:
+        rows = trend_keywords_by_website.get(website_id, [])
+        month_active = _collect_active_trends(rows, period_type="month") if website_enabled else []
+        season_active = _collect_active_trends(rows, period_type="season") if website_enabled else []
+        month_trends_by_website[website_id] = month_active
+        season_trends_by_website[website_id] = season_active
+        if month_active or season_active:
             any_active_trends = True
 
     if not any_active_trends:
@@ -259,89 +237,81 @@ def rank_pages_for_trends(
         top_n = setting_top_n if setting_top_n > 0 else len(pages)
     top_n = min(top_n, len(pages))
 
-    if similarity_threshold_override is not None:
-        threshold = max(0.0, min(1.0, float(similarity_threshold_override)))
-    else:
-        threshold = max(0.0, min(1.0, float(default_settings.get("similarity_threshold", 0.0) or 0.0)))
+    selected_entries: list[RankedPageEntry] = []
+    selected_page_ids: set[int] = set()
 
-    if diversity_enabled_override is not None:
-        diversity_enabled = bool(diversity_enabled_override)
-    else:
-        diversity_enabled = bool(default_settings.get("diversity_enabled", False))
+    def collect_bucket(bucket: str, trends_by_website: dict[int, list[ActiveTrendKeyword]]) -> None:
+        bucket_entries: list[RankedPageEntry] = []
+        for index, page in enumerate(pages):
+            if page.id in selected_page_ids:
+                continue
+            page_text = _build_page_ranking_text(page)
+            page_tokens = _tokenize(page_text)
+            active_trends = trends_by_website.get(page.website_id, [])
+            score, matched_keywords = _score_lexical(page_text, page_tokens, active_trends)
+            if score <= 0:
+                continue
+            matched_words: set[str] = set()
+            for trend in active_trends:
+                if trend.keyword in matched_keywords:
+                    matched_words.update(page_tokens & trend.tokens)
+            bucket_entries.append(
+                RankedPageEntry(
+                    page=page,
+                    original_index=index,
+                    text=page_text,
+                    tokens=page_tokens,
+                    score=score,
+                    lexical_score=score,
+                    matched_keywords=matched_keywords,
+                    priority_bucket=bucket,
+                    matched_words=sorted(matched_words),
+                )
+            )
+        bucket_entries.sort(key=lambda item: (-item.score, item.original_index))
+        for entry in bucket_entries:
+            selected_entries.append(entry)
+            selected_page_ids.add(entry.page.id)
 
-    if diversity_penalty_override is not None:
-        diversity_penalty = float(diversity_penalty_override)
-    else:
-        diversity_penalty = float(default_settings.get("diversity_penalty", 0.15) or 0.15)
-    diversity_penalty = max(0.0, min(1.0, diversity_penalty))
+    collect_bucket("month", month_trends_by_website)
+    collect_bucket("season", season_trends_by_website)
 
-    if semantic_enabled_override is not None:
-        semantic_enabled = bool(semantic_enabled_override)
-    else:
-        semantic_enabled = bool(default_settings.get("semantic_enabled", False))
-
-    ranked_entries: list[RankedPageEntry] = []
-    seo_lookup = seo_keywords_by_url or {}
     for index, page in enumerate(pages):
-        page_text = _build_page_ranking_text(page, seo_lookup.get(page.url, []))
+        if page.id in selected_page_ids:
+            continue
+        page_text = _build_page_ranking_text(page)
         page_tokens = _tokenize(page_text)
-        active_trends = active_trends_by_website.get(page.website_id, [])
-        lexical_score, matched_keywords = _score_lexical(page_text, page_tokens, active_trends)
-        ranked_entries.append(
+        selected_entries.append(
             RankedPageEntry(
                 page=page,
                 original_index=index,
                 text=page_text,
                 tokens=page_tokens,
-                score=lexical_score,
-                lexical_score=lexical_score,
-                matched_keywords=matched_keywords,
+                score=0.0,
+                lexical_score=0.0,
+                matched_keywords=[],
+                priority_bucket="evergreen",
+                matched_words=[],
             )
         )
 
-    semantic_scores = _score_semantic(
-        ranked_entries,
-        [item for items in active_trends_by_website.values() for item in items],
-        enabled=semantic_enabled,
-    )
-    if semantic_scores:
-        for entry in ranked_entries:
-            semantic_score = semantic_scores.get(entry.page.id)
-            if semantic_score is None:
-                continue
-            entry.score = (entry.lexical_score * 0.7) + (float(semantic_score) * 0.3)
-
-    ranked_entries.sort(key=lambda item: (-item.score, item.original_index))
-    threshold_pool = [item for item in ranked_entries if item.score >= threshold]
-    if len(threshold_pool) >= top_n:
-        candidate_pool = threshold_pool
-    else:
-        candidate_pool = ranked_entries
-
-    if diversity_enabled:
-        selected_entries = _select_with_diversity(
-            candidate_pool,
-            top_n=top_n,
-            diversity_penalty=diversity_penalty,
-        )
-    else:
-        selected_entries = candidate_pool[:top_n]
+    selected_entries = selected_entries[:top_n]
 
     return [item.page for item in selected_entries], {
         "ranking_applied": True,
-        "reason": "active_trends",
+        "reason": "priority_trend_pipeline",
         "total_candidates": len(pages),
         "selected_count": len(selected_entries),
         "top_n": top_n,
-        "threshold": threshold,
-        "diversity_enabled": diversity_enabled,
-        "diversity_penalty": diversity_penalty,
-        "semantic_enabled": semantic_enabled,
+        "matching_source": "title",
+        "ignored_period_types": ["always"],
         "page_scores": [
             {
                 "page_id": item.page.id,
                 "score": round(item.score, 4),
+                "bucket": item.priority_bucket,
                 "matched_trends": item.matched_keywords[:5],
+                "matched_words": item.matched_words[:10],
             }
             for item in selected_entries
         ],

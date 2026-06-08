@@ -14,12 +14,15 @@ import tempfile
 import os
 import shutil
 import uuid
+import random
 from io import BytesIO
 from sqlalchemy.orm import Session
 import logging
 
 from models import Page, PinDraft, Template
+from services.image_dedupe import canonical_image_url_key, dedupe_image_urls
 from services.template_parser import parse_svg_template
+from services.remote_fetch import MAX_IMAGE_BYTES, fetch_remote_sync
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +34,52 @@ RENDERER_DIR.mkdir(parents=True, exist_ok=True)
 NODE_RENDERER_PATH = Path(__file__).parent.parent / "node_renderer" / "render.js"
 RENDER_LAYOUT_VERSION = 5
 DEFAULT_RENDER_ENGINE = "resvg"
+RENDER_TIMEOUT_SECONDS = max(10.0, float(os.getenv("PIN_RENDER_TIMEOUT_SECONDS", "60")))
 
 
 def resolve_render_engine() -> str:
     raw = str(os.getenv("PIN_RENDER_ENGINE") or DEFAULT_RENDER_ENGINE).strip().lower()
     return raw if raw in {"resvg", "canvas"} else DEFAULT_RENDER_ENGINE
+
+
+def media_file_path(media_url: str | None) -> Path | None:
+    if not media_url:
+        return None
+    filename = media_url.rsplit("/", 1)[-1].split("?", 1)[0].strip()
+    if not filename or Path(filename).name != filename:
+        return None
+    path = (RENDERER_DIR / filename).resolve()
+    if path.parent != RENDERER_DIR.resolve():
+        return None
+    return path
+
+
+def delete_generated_media(media_url: str | None) -> None:
+    path = media_file_path(media_url)
+    if not path:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Failed to delete generated media: %s", path)
+
+
+def cleanup_orphaned_generated_pins(db: Session, grace_seconds: int = 3600) -> int:
+    referenced = {
+        path.name
+        for media_url, in db.query(PinDraft.media_url).filter(PinDraft.media_url.is_not(None)).all()
+        if (path := media_file_path(media_url)) is not None
+    }
+    cutoff = time.time() - max(0, grace_seconds)
+    removed = 0
+    for path in RENDERER_DIR.glob("pin_*.png"):
+        try:
+            if path.name not in referenced and path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            logger.warning("Failed to inspect or remove orphaned media: %s", path)
+    return removed
 
 
 def normalize_image_bytes(image_bytes: bytes, source_url: str, content_type: str) -> tuple[bytes, str]:
@@ -63,6 +107,7 @@ def normalize_image_bytes(image_bytes: bytes, source_url: str, content_type: str
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=True,
+                timeout=15,
             )
             if result.stdout:
                 return result.stdout, "image/png"
@@ -87,6 +132,29 @@ def sort_page_images(images: list["PageImage"]) -> list["PageImage"]:
             img.id or 0,
         ),
     )
+
+
+def select_render_image_urls(
+    available_urls: list[str],
+    selected_image_url: str | None,
+    image_slot_count: int,
+) -> list[str]:
+    """Keep the selected image first and randomly fill remaining image slots."""
+    slot_count = max(1, int(image_slot_count or 1))
+    unique_available = dedupe_image_urls(available_urls)
+    selected: list[str] = []
+    if selected_image_url:
+        selected.append(selected_image_url)
+    selected_key = canonical_image_url_key(selected_image_url) if selected_image_url else None
+    remaining = [
+        url
+        for url in unique_available
+        if canonical_image_url_key(url) != selected_key
+    ]
+    remaining_count = max(0, slot_count - len(selected))
+    if remaining_count and remaining:
+        selected.extend(random.sample(remaining, k=min(remaining_count, len(remaining))))
+    return selected[:slot_count]
 
 
 async def render_pin_to_file(
@@ -115,9 +183,7 @@ async def render_pin_to_file(
     # Import PageImage here to avoid circular imports
     from models import PageImage
     from database import SessionLocal
-    import requests
     import base64
-    from io import BytesIO
 
     # Always trust fresh parser-detected zones from SVG for rendering.
     # This keeps server generation aligned with live preview behavior.
@@ -135,24 +201,16 @@ async def render_pin_to_file(
     # Get page images
     db = SessionLocal()
     try:
-        if selected_image_url:
-            # Use the selected image as the primary image
-            image_urls = [selected_image_url]
-            additional_images = (
-                db.query(PageImage)
-                .filter(PageImage.page_id == page.id, PageImage.is_excluded == False, PageImage.url != selected_image_url)
-                .all()
-            )
-            additional_images = sort_page_images(additional_images)[: max(0, image_slot_count - 1)]
-            image_urls.extend([img.url for img in additional_images])
-        else:
-            # No specific image selected, use as many images as template slots
-            images = (
-                db.query(PageImage)
-                .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
-                .all()
-            )
-            image_urls = [img.url for img in sort_page_images(images)[:image_slot_count]]
+        images = (
+            db.query(PageImage)
+            .filter(PageImage.page_id == page.id, PageImage.is_excluded == False, PageImage.excluded_by_global_rule == False)
+            .all()
+        )
+        image_urls = select_render_image_urls(
+            [img.url for img in images if img.url],
+            selected_image_url,
+            image_slot_count,
+        )
     finally:
         db.close()
 
@@ -165,9 +223,10 @@ async def render_pin_to_file(
             continue
         try:
             logger.info(f"Downloading image: {url}")
-            response = requests.get(
+            response = fetch_remote_sync(
                 url,
                 timeout=15,
+                max_bytes=MAX_IMAGE_BYTES,
                 headers={
                     'User-Agent': 'Mozilla/5.0 (compatible; PinterestCSVTool/1.0)',
                     'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
@@ -175,7 +234,10 @@ async def render_pin_to_file(
                 },
             )
             if response.status_code == 200:
-                content_type = response.headers.get('content-type', 'image/jpeg')
+                content_type = response.headers.get('content-type', '').split(';', 1)[0].strip().lower()
+                if not content_type.startswith("image/"):
+                    logger.warning("Remote URL did not return an image: %s (%s)", url, content_type)
+                    continue
                 encoded_bytes = response.content
                 encoded_type = content_type
 
@@ -307,8 +369,8 @@ async def render_pin_to_file(
                 {'x': 0, 'y': bottom_start, 'width': template.width, 'height': bottom_height},
             ]
     logger.info(f"Rendering pin with {len(zones)} zones")
-    logger.info(f"Image 1: {'Downloaded' if image_data_urls[0] else 'None'}")
-    logger.info(f"Image 2: {'Downloaded' if image_data_urls[1] else 'None'}")
+    logger.info(f"Image 1: {'Downloaded' if image_data_urls and image_data_urls[0] else 'None'}")
+    logger.info(f"Image 2: {'Downloaded' if len(image_data_urls) > 1 and image_data_urls[1] else 'None'}")
     logger.debug(f"Zones data: {zones}")
 
     render_data = {
@@ -375,10 +437,20 @@ async def _render_with_nodejs(render_data: Dict[str, Any]) -> Dict[str, Any]:
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await process.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=RENDER_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise TimeoutError(
+                f"Node.js renderer exceeded {RENDER_TIMEOUT_SECONDS:.0f} seconds"
+            ) from exc
 
         if process.returncode != 0:
-            error_msg = stderr.decode('utf-8') if stderr else 'Unknown error'
+            error_msg = stderr[-16_384:].decode('utf-8', errors='replace') if stderr else 'Unknown error'
             raise Exception(f"Node.js renderer failed: {error_msg}")
 
         try:
@@ -1102,6 +1174,8 @@ async def generate_pin_media_url(
 
     template_data = parse_svg_template(svg_content)
 
+    old_media_url = pin.media_url
+
     # Generate output filename (unique per render to avoid stale-file collisions).
     timestamp = int(time.time() * 1000)
     suffix = uuid.uuid4().hex[:8]
@@ -1129,8 +1203,14 @@ async def generate_pin_media_url(
             f"&re={engine_used or resolve_render_engine()}"
         )
         db.commit()
+        if old_media_url and old_media_url != pin.media_url:
+            delete_generated_media(old_media_url)
         return pin.media_url
 
+    try:
+        output_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Failed to remove partial render output: %s", output_path)
     return None
 
 

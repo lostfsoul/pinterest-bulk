@@ -17,7 +17,6 @@ from models import (
     Page,
     PinDraft,
     ScheduleSettings,
-    SEOKeyword,
     Template,
     Website,
     WebsiteTrendKeyword,
@@ -210,21 +209,6 @@ def _enabled_page_ids(db: Session, website_id: int) -> list[int]:
         .all()
     )
     return [row[0] for row in rows]
-
-
-def _split_keyword_csv(value: str | None) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in (value or "").split(","):
-        keyword = item.strip()
-        if not keyword:
-            continue
-        key = keyword.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(keyword)
-    return result
 
 
 def _clamp_int(value: Any, fallback: int, minimum: int, maximum: int) -> int:
@@ -523,14 +507,20 @@ def _scheduled_count_in_window(
     )
 
 
-def _is_page_blocked_by_content_limits(db: Session, page: Page, content: dict[str, Any]) -> bool:
+def _is_page_blocked_by_content_limits(
+    db: Session,
+    page: Page,
+    content: dict[str, Any],
+    *,
+    default_gap_days: int = 0,
+) -> bool:
     existing = (
         db.query(PinDraft)
         .filter(PinDraft.page_id == page.id)
         .order_by(PinDraft.created_at.desc())
         .all()
     )
-    desired_gap_days = _clamp_int(content.get("desired_gap_days"), 0, 0, 365)
+    desired_gap_days = _clamp_int(content.get("desired_gap_days"), default_gap_days, 0, 365)
     if desired_gap_days > 0 and existing:
         if (datetime.utcnow() - existing[0].created_at).days < desired_gap_days:
             return True
@@ -554,17 +544,11 @@ def _rank_enabled_pages_for_workflow(db: Session, website: Website, pages: list[
     if not pages:
         return []
 
-    keyword_rows = db.query(SEOKeyword).filter(SEOKeyword.url.in_([page.url for page in pages])).all()
-    seo_keywords_by_url = {
-        row.url: _split_keyword_csv(row.keywords)
-        for row in keyword_rows
-    }
     trend_rows = db.query(WebsiteTrendKeyword).filter(WebsiteTrendKeyword.website_id == website.id).all()
     ranked_pages, _ = rank_pages_for_trends(
         pages,
         trend_keywords_by_website={website.id: trend_rows},
         generation_settings_by_website={website.id: website.generation_settings or {}},
-        seo_keywords_by_url=seo_keywords_by_url,
         top_n_override=len(pages),
     )
     return ranked_pages
@@ -585,13 +569,16 @@ def select_workflow_page_ids(
         .order_by(Page.created_at.desc())
         .all()
     )
-    ranked_pages = _rank_enabled_pages_for_workflow(db, website, pages)
     content = _get_content_settings(website)
+    eligible_pages = [
+        page
+        for page in pages
+        if not _is_page_blocked_by_content_limits(db, page, content, default_gap_days=31)
+    ]
+    ranked_pages = _rank_enabled_pages_for_workflow(db, website, eligible_pages)
 
     selected: list[int] = []
     for page in ranked_pages:
-        if _is_page_blocked_by_content_limits(db, page, content):
-            continue
         selected.append(page.id)
         if len(selected) >= target_count:
             break

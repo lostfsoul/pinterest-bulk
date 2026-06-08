@@ -7,6 +7,7 @@ import httpx
 import os
 from dataclasses import dataclass
 from typing import Literal
+from services.remote_fetch import MAX_METADATA_BYTES, fetch_remote
 
 # User agent for requests
 HEADERS = {
@@ -86,7 +87,7 @@ async def fetch_image_metadata(
         if own_client:
             metadata_client = httpx.AsyncClient(
                 timeout=IMAGE_METADATA_TIMEOUT_SECONDS,
-                follow_redirects=True,
+                follow_redirects=False,
                 headers=HEADERS,
             )
 
@@ -96,7 +97,14 @@ async def fetch_image_metadata(
         response = None
         for attempt in range(retry_count + 1):
             try:
-                response = await metadata_client.head(image_url)
+                response = await fetch_remote(
+                    image_url,
+                    method="HEAD",
+                    headers=HEADERS,
+                    timeout=IMAGE_METADATA_TIMEOUT_SECONDS,
+                    max_bytes=MAX_METADATA_BYTES,
+                    client=metadata_client,
+                )
                 break
             except Exception:
                 if attempt >= retry_count:
@@ -124,9 +132,12 @@ async def fetch_image_metadata(
         # Try a small range request to get file size.
         if metadata.file_size is None:
             try:
-                range_response = await metadata_client.get(
+                range_response = await fetch_remote(
                     image_url,
-                    headers={"Range": "bytes=0-0"}
+                    headers={**HEADERS, "Range": "bytes=0-0"},
+                    timeout=IMAGE_METADATA_TIMEOUT_SECONDS,
+                    max_bytes=MAX_METADATA_BYTES,
+                    client=metadata_client,
                 )
                 content_range = range_response.headers.get("content-range", "")
                 if content_range and "/" in content_range:

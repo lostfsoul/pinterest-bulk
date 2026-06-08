@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from database import engine, get_db, init_db, SessionLocal
 from models import GenerationJob, ScheduleSettings
 from services.auth import is_request_authenticated
+from services.database_backup import run_database_backup_loop
 from services.workflow_scheduler import run_workflow_scheduler
 
 # Static files directory
@@ -40,6 +41,21 @@ def load_local_env() -> None:
 
 
 load_local_env()
+
+
+def validate_production_configuration() -> None:
+    if os.getenv("PRODUCTION_MODE", "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    missing = [
+        name
+        for name in ("APP_PASSWORD", "APP_SESSION_SECRET", "PUBLIC_BASE_URL")
+        if not os.getenv(name, "").strip()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing required production environment variables: "
+            + ", ".join(missing)
+        )
 
 
 def mark_interrupted_generation_jobs_failed(db: Session) -> int:
@@ -73,6 +89,7 @@ def mark_interrupted_generation_jobs_failed(db: Session) -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize database on startup."""
+    validate_production_configuration()
     init_db()
 
     # Ensure default schedule settings exist
@@ -83,21 +100,32 @@ async def lifespan(app: FastAPI):
             db.add(settings)
             db.commit()
         mark_interrupted_generation_jobs_failed(db)
+        from services.pin_renderer import cleanup_orphaned_generated_pins
+        cleanup_orphaned_generated_pins(
+            db,
+            grace_seconds=max(
+                0,
+                int(os.getenv("GENERATED_MEDIA_CLEANUP_GRACE_SECONDS", "3600")),
+            ),
+        )
     finally:
         db.close()
 
     stop_event = asyncio.Event()
     scheduler_task = asyncio.create_task(run_workflow_scheduler(stop_event))
+    backup_task = asyncio.create_task(run_database_backup_loop(stop_event))
 
     try:
         yield
     finally:
         stop_event.set()
         scheduler_task.cancel()
-        try:
-            await scheduler_task
-        except asyncio.CancelledError:
-            pass
+        backup_task.cancel()
+        for task in (scheduler_task, backup_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

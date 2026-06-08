@@ -4,7 +4,7 @@ SQLite database setup and session management.
 import os
 import re
 from pathlib import Path
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Ensure data directory exists
@@ -18,8 +18,22 @@ DATABASE_URL = f"sqlite:///{DATA_DIR}/pinterest.db"
 # Create engine with connection pooling for SQLite
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
+    pool_pre_ping=True,
 )
+
+
+@event.listens_for(engine, "connect")
+def configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

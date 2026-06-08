@@ -5,7 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Any
 
-import requests
+from services.remote_fetch import MAX_IMAGE_BYTES, fetch_remote_sync
 
 
 def normalize_hex_color(value: str | None, default: str) -> str:
@@ -115,16 +115,19 @@ def sample_image_palette(
         return None
 
     try:
-        response = requests.get(
+        response = fetch_remote_sync(
             image_url,
             timeout=timeout,
+            max_bytes=MAX_IMAGE_BYTES,
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; PinterestCSVTool/1.0)",
                 "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
                 "Referer": referer or "",
             },
         )
-        response.raise_for_status()
+        content_type = response.headers.get("content-type", "").lower()
+        if not content_type.startswith("image/"):
+            return None
         with Image.open(BytesIO(response.content)) as image:
             sampled = image.convert("RGB")
             sampled.thumbnail((24, 24))

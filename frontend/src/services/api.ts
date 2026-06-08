@@ -333,6 +333,8 @@ export interface TrendKeywordMatchPage {
 
 export interface TrendKeywordMatchItem {
   keyword: string;
+  period_type?: string;
+  period_value?: string | null;
   weight: number;
   matched_count: number;
   matched_pages: TrendKeywordMatchPage[];

@@ -2,7 +2,9 @@
 Pin draft generation and management router.
 """
 import asyncio
+import os
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -24,6 +26,7 @@ from models import (
     Website,
     GenerationJob,
     WebsiteTrendKeyword,
+    GlobalExcludedImage,
 )
 from schemas import (
     GenerationPreviewRequest,
@@ -35,14 +38,20 @@ from schemas import (
     PinGenerateRequest,
     PinRenderSettings,
 )
-from routers.images import scrape_page_into_db
+from routers.images import SCRAPE_PAGES_CONCURRENCY, scrape_page_images, scrape_page_into_db
 from services.palette import normalize_hex_color, resolve_palette_settings
+from services.image_dedupe import dedupe_image_variants
 from services.template_parser import parse_svg_template
 from services.trend_ranking import rank_pages_for_trends
 
 router = APIRouter()
+_GENERATION_JOB_LOCK = threading.Lock()
 
 _TEMPLATE_STORAGE_ROOT = Path(__file__).resolve().parents[2] / "storage" / "templates"
+try:
+    IMAGE_REFRESH_STALE_DAYS = max(1, int(os.getenv("GENERATION_IMAGE_REFRESH_STALE_DAYS", "14")))
+except ValueError:
+    IMAGE_REFRESH_STALE_DAYS = 14
 
 
 # =============================================================================
@@ -203,7 +212,6 @@ def _build_generation_context(
         diversity_enabled_override=request.diversity_enabled,
         diversity_penalty_override=request.diversity_penalty,
         semantic_enabled_override=request.semantic_enabled,
-        seo_keywords_by_url=seo_keywords_by_url,
     )
 
     if not pages:
@@ -223,6 +231,147 @@ def _build_generation_context(
         "website_generation_settings": website_generation_settings,
         "ranking_meta": ranking_meta,
     }
+
+
+def _load_available_page_images(db: Session, page_id: int) -> list[PageImage]:
+    return (
+        db.query(PageImage)
+        .filter(
+            PageImage.page_id == page_id,
+            PageImage.is_excluded == False,
+            PageImage.excluded_by_global_rule == False,
+        )
+        .all()
+    )
+
+
+def _page_image_inventory_needs_refresh(
+    *,
+    page: Page,
+    filtered_images: list[PageImage],
+    effective_image_settings: dict,
+) -> bool:
+    if not bool(effective_image_settings.get("fetch_from_page", True)):
+        return False
+    if not filtered_images:
+        return True
+    if page.scraped_at is None:
+        return True
+    return page.scraped_at < datetime.utcnow() - timedelta(days=IMAGE_REFRESH_STALE_DAYS)
+
+
+def _image_settings_for_page(
+    page: Page,
+    website_generation_settings: dict[int, dict],
+    request_image_settings: dict | None,
+) -> dict:
+    site_settings = website_generation_settings.get(page.website_id, {})
+    return _resolve_effective_image_settings(site_settings, request_image_settings)
+
+
+def _generation_images_for_page(
+    db: Session,
+    page: Page,
+    effective_image_settings: dict,
+) -> tuple[list[PageImage], list[PageImage]]:
+    images = _load_available_page_images(db, page.id)
+    filtered_images = apply_generation_image_filters(images, {"image_settings": effective_image_settings})
+    return images, filtered_images
+
+
+def _run_generation_image_preflight(
+    db: Session,
+    pages: list[Page],
+    website_generation_settings: dict[int, dict],
+    request_image_settings: dict | None,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[int, int]:
+    scrape_targets: list[Page] = []
+    for page in pages:
+        effective_image_settings = _image_settings_for_page(page, website_generation_settings, request_image_settings)
+        _, filtered_images = _generation_images_for_page(db, page, effective_image_settings)
+        if _page_image_inventory_needs_refresh(
+            page=page,
+            filtered_images=filtered_images,
+            effective_image_settings=effective_image_settings,
+        ):
+            scrape_targets.append(page)
+
+    if not scrape_targets:
+        return 0, 0
+
+    _emit_progress(
+        progress_callback,
+        phase="scraping",
+        message=f"Refreshing images for {len(scrape_targets)} selected page(s)",
+        total_pages=len(pages),
+        processed_pages=0,
+        scraped_pages=0,
+        failed_pages=0,
+    )
+
+    async def scrape_selected_pages() -> list:
+        semaphore = asyncio.Semaphore(SCRAPE_PAGES_CONCURRENCY)
+
+        async def scrape_for_page(page: Page):
+            async with semaphore:
+                return page.id, await scrape_page_images(page.url)
+
+        return await asyncio.gather(
+            *(scrape_for_page(page) for page in scrape_targets),
+            return_exceptions=True,
+        )
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        pre_scraped_results = loop.run_until_complete(scrape_selected_pages())
+    finally:
+        loop.close()
+
+    results_by_page_id: dict[int, list] = {}
+    failed = 0
+    for result in pre_scraped_results:
+        if isinstance(result, Exception):
+            failed += 1
+            continue
+        page_id, scrape_results = result
+        results_by_page_id[int(page_id)] = scrape_results
+
+    scraped = 0
+    global_rules = db.query(GlobalExcludedImage).all()
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        for index, page in enumerate(scrape_targets, start=1):
+            if page.id not in results_by_page_id:
+                continue
+            try:
+                loop.run_until_complete(
+                    scrape_page_into_db(
+                        page,
+                        db,
+                        global_rules,
+                        pre_scrape_results=results_by_page_id.get(page.id),
+                    )
+                )
+                scraped += 1
+            except Exception:
+                db.rollback()
+                failed += 1
+            _emit_progress(
+                progress_callback,
+                phase="scraping",
+                message=f"Refreshed images for {index} of {len(scrape_targets)} selected page(s)",
+                total_pages=len(pages),
+                processed_pages=0,
+                scraped_pages=scraped,
+                failed_pages=failed,
+            )
+    finally:
+        loop.close()
+
+    return scraped, failed
 
 
 def _generate_pin_drafts(
@@ -248,6 +397,7 @@ def _generate_pin_drafts(
 
     pins_created = 0
     all_new_pins: list[PinDraft] = []
+    media_to_delete: list[str] = []
     skipped = {
         "no_images": 0,
         "gap": 0,
@@ -260,7 +410,6 @@ def _generate_pin_drafts(
     template_image_slots = max(1, len([zone for zone in template.zones if zone.zone_type == "image"]))
     manual_keywords = parse_manual_keywords(request.manual_keywords)
     use_manual_keywords = request.keyword_mode == "manual" and len(manual_keywords) > 0
-    global_rules = None
     scraped_pages = 0
     failed_pages = 0
 
@@ -276,6 +425,15 @@ def _generate_pin_drafts(
         ranking_applied=bool(ranking_meta.get("ranking_applied")),
         ranking_reason=ranking_meta.get("reason"),
     )
+
+    if auto_scrape_missing:
+        scraped_pages, failed_pages = _run_generation_image_preflight(
+            db,
+            pages,
+            website_generation_settings,
+            request.image_settings or None,
+            progress_callback,
+        )
 
     for index, page in enumerate(pages, start=1):
         keywords = manual_keywords if use_manual_keywords else select_keywords_for_generation(
@@ -303,42 +461,8 @@ def _generate_pin_drafts(
         no_link_pins = bool(content_settings.get("no_link_pins", False))
         page_language = requested_language or default_language
 
-        images = (
-            db.query(PageImage)
-            .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
-            .all()
-        )
         effective_image_settings = _resolve_effective_image_settings(site_settings, request.image_settings or None)
-        if auto_scrape_missing and not images and bool(effective_image_settings.get("fetch_from_page", True)):
-            if global_rules is None:
-                from models import GlobalExcludedImage
-                global_rules = db.query(GlobalExcludedImage).all()
-            loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(scrape_page_into_db(page, db, global_rules))
-                scraped_pages += 1
-            except Exception:
-                db.rollback()
-                failed_pages += 1
-            finally:
-                loop.close()
-            images = (
-                db.query(PageImage)
-                .filter(PageImage.page_id == page.id, PageImage.is_excluded == False)
-                .all()
-            )
-            _emit_progress(
-                progress_callback,
-                phase="scraping",
-                message=f"Scraped images for page {index} of {len(pages)}",
-                total_pages=len(pages),
-                processed_pages=index - 1,
-                scraped_pages=scraped_pages,
-                failed_pages=failed_pages,
-            )
-
-        images = apply_generation_image_filters(images, {"image_settings": effective_image_settings})
+        _, images = _generation_images_for_page(db, page, effective_image_settings)
         existing_for_constraints = (
             db.query(PinDraft)
             .filter(PinDraft.page_id == page.id)
@@ -433,6 +557,8 @@ def _generate_pin_drafts(
         page_render_settings = resolve_page_render_settings(page, render_settings, primary_image.url)
 
         if pin_to_keep:
+            if pin_to_keep.media_url:
+                media_to_delete.append(pin_to_keep.media_url)
             pin_to_keep.template_id = template.id
             pin_to_keep.selected_image_url = primary_image.url
             pin_to_keep.title = pin_title
@@ -448,6 +574,8 @@ def _generate_pin_drafts(
             pins_created += 1
             all_new_pins.append(pin_to_keep)
             for stale_pin in existing_pins[1:]:
+                if stale_pin.media_url:
+                    media_to_delete.append(stale_pin.media_url)
                 db.delete(stale_pin)
         else:
             pin = PinDraft(
@@ -481,6 +609,10 @@ def _generate_pin_drafts(
         )
 
     db.commit()
+    if media_to_delete:
+        from services.pin_renderer import delete_generated_media
+        for media_url in media_to_delete:
+            delete_generated_media(media_url)
 
     if pins_created == 0:
         reason_parts = []
@@ -546,7 +678,7 @@ def render_pin_background(pin_id: int):
         db.close()
 
 
-def run_generation_job(job_id: int) -> None:
+def _run_generation_job(job_id: int) -> None:
     """Run generation job in the background."""
     from services.pin_renderer import generate_pin_media_url
 
@@ -624,6 +756,7 @@ def run_generation_job(job_id: int) -> None:
         try:
             asyncio.set_event_loop(loop)
             rendered = 0
+            render_failures = 0
             for idx, pin_id in enumerate(pin_ids, start=1):
                 pin = db.query(PinDraft).filter(PinDraft.id == pin_id).first()
                 if not pin:
@@ -634,26 +767,39 @@ def run_generation_job(job_id: int) -> None:
                 url = loop.run_until_complete(generate_pin_media_url(pin, db, settings))
                 pin.status = "ready" if url else "draft"
                 db.commit()
-                rendered += 1
+                if url:
+                    rendered += 1
+                else:
+                    render_failures += 1
                 _update_generation_job(
                     db,
                     job,
                     phase="rendering",
-                    message=f"Rendered {idx} of {len(pin_ids)} pins",
+                    message=(
+                        f"Processed {idx} of {len(pin_ids)} pins"
+                        f" ({rendered} rendered, {render_failures} failed)"
+                    ),
                     rendered_pins=rendered,
                     total_pins=len(pin_ids),
                 )
         finally:
             loop.close()
 
+        final_status = "completed" if rendered > 0 or not pin_ids else "failed"
+        final_message = f"Completed generation: {rendered} rendered"
+        error_detail = None
+        if render_failures:
+            final_message += f", {render_failures} failed"
+            error_detail = f"{render_failures} pin render(s) failed."
         _update_generation_job(
             db,
             job,
-            status="completed",
-            phase="complete",
-            message=f"Completed generation for {len(pin_ids)} pins",
+            status=final_status,
+            phase="complete" if final_status == "completed" else "error",
+            message=final_message,
+            error_detail=error_detail,
             total_pins=len(pin_ids),
-            rendered_pins=len(pin_ids),
+            rendered_pins=rendered,
             completed_at=datetime.utcnow(),
         )
     except HTTPException as error:
@@ -679,6 +825,12 @@ def run_generation_job(job_id: int) -> None:
         )
     finally:
         db.close()
+
+
+def run_generation_job(job_id: int) -> None:
+    """Run one generation job at a time on the single-instance deployment."""
+    with _GENERATION_JOB_LOCK:
+        _run_generation_job(job_id)
 
 
 def _load_template_svg_defaults(template: Template) -> dict:
@@ -903,7 +1055,7 @@ def parse_manual_keywords(value: str | None) -> list[str]:
     keywords: list[str] = []
     seen: set[str] = set()
     for raw in value.split(","):
-        keyword = raw.strip()
+        keyword = re.sub(r"\s+", " ", raw.strip())
         if not keyword:
             continue
         lowered = keyword.casefold()
@@ -912,6 +1064,24 @@ def parse_manual_keywords(value: str | None) -> list[str]:
         seen.add(lowered)
         keywords.append(keyword)
     return keywords
+
+
+def normalize_generation_keywords(keywords: list[str], limit: int = 8) -> list[str]:
+    """Normalize SEO/manual keywords for pin content generation."""
+    normalized_keywords: list[str] = []
+    seen: set[str] = set()
+    for item in keywords:
+        keyword = re.sub(r"\s+", " ", (item or "").strip())
+        if not keyword:
+            continue
+        key = keyword.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_keywords.append(keyword)
+        if len(normalized_keywords) >= limit:
+            break
+    return normalized_keywords
 
 
 def clip_text(value: str, max_chars: int) -> str:
@@ -940,35 +1110,29 @@ def apply_cta(description: str, cta_style: str) -> str:
 
 def generate_pin_description(page: Page, keywords: List[str]) -> str:
     """Generate a pin description from page and keywords."""
-    parts = []
+    title = sanitize_generated_text(page.title or "")
+    keyword_list = normalize_generation_keywords(keywords, limit=5)
 
-    if page.title:
-        parts.append(page.title)
+    if title and keyword_list:
+        keyword_phrase = ", ".join(keyword_list[:3])
+        return sanitize_generated_text(
+            f"{title} with ideas for {keyword_phrase}. Read more at the link below."
+        )
 
-    if keywords:
-        parts.append(f"Keywords: {', '.join(keywords[:5])}")
+    if title:
+        return sanitize_generated_text(f"{title}. Read more at the link below.")
 
-    if page.url:
-        parts.append(f"Read more at the link below.")
+    if keyword_list:
+        return sanitize_generated_text(
+            f"Explore ideas for {', '.join(keyword_list[:3])}. Read more at the link below."
+        )
 
-    return sanitize_generated_text("\n\n".join(parts) if parts else "")
+    return ""
 
 
 def select_keywords_for_generation(page_keywords: list[str]) -> list[str]:
     """Return de-duplicated SEO keywords for a page."""
-    keywords: list[str] = []
-    seen: set[str] = set()
-
-    for item in page_keywords:
-        keyword = (item or "").strip()
-        if not keyword:
-            continue
-        key = keyword.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        keywords.append(keyword)
-    return keywords
+    return normalize_generation_keywords(page_keywords, limit=8)
 
 
 def _playground_ai_settings_from_website_settings(site_settings: dict | None) -> dict:
@@ -1205,8 +1369,9 @@ def choose_images_for_mode(
     if not images:
         return []
 
+    unique_images = dedupe_image_variants(images, lambda image: image.url)
     sorted_images = sorted(
-        images,
+        unique_images,
         key=lambda img: (
             0 if img.category == "featured" else 1 if img.category == "article" else 2,
             -(img.width or 0) * (img.height or 0),
@@ -1435,8 +1600,6 @@ def preview_generation(
             sample=[],
         )
 
-    seo_keywords_by_url = _load_seo_keywords_by_url(db, [page.url for page in pages])
-
     text_variations = int((request.variation_options or {}).get("text_variations", 1) or 1)
     text_variations = max(1, text_variations)
     template_image_slots = max(1, len([zone for zone in template.zones if zone.zone_type == "image"]))
@@ -1464,7 +1627,6 @@ def preview_generation(
         diversity_enabled_override=request.diversity_enabled,
         diversity_penalty_override=request.diversity_penalty,
         semantic_enabled_override=request.semantic_enabled,
-        seo_keywords_by_url=seo_keywords_by_url,
     )
 
     if not pages:
@@ -1536,6 +1698,17 @@ def generate_pins_job(
     db: Session = Depends(get_db),
 ):
     """Start background pin generation job with progress tracking."""
+    active_job = (
+        db.query(GenerationJob.id)
+        .filter(GenerationJob.status.in_(["queued", "running"]))
+        .first()
+    )
+    if active_job:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another generation job is already queued or running.",
+        )
+
     job = GenerationJob(
         website_id=request.website_id,
         template_id=request.template_id,
@@ -1720,9 +1893,17 @@ def clear_all_pins(
         elif request.selected_only:
             query = query.filter(PinDraft.is_selected == True)
 
+    media_urls = [
+        media_url
+        for media_url, in query.with_entities(PinDraft.media_url).all()
+        if media_url
+    ]
     query.delete(synchronize_session=False)
 
     db.commit()
+    from services.pin_renderer import delete_generated_media
+    for media_url in media_urls:
+        delete_generated_media(media_url)
 
     return None
 

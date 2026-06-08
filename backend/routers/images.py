@@ -5,7 +5,7 @@ import os
 import re
 import asyncio
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,6 +13,10 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 import httpx
+try:
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover - fallback when optional dependency is missing
+    BeautifulSoup = None
 
 from database import get_db
 from models import Page, PageImage, SEOKeyword, Website, GlobalExcludedImage
@@ -33,7 +37,13 @@ from services.image_metadata import (
     IMAGE_METADATA_TIMEOUT_SECONDS,
 )
 from services.image_classifier import classify_image, should_auto_exclude, ImageCategory
+from services.image_dedupe import (
+    canonical_image_url_key,
+    dedupe_image_variants,
+    image_variant_score,
+)
 from services.global_exclusion import check_global_exclusion, apply_exclusion_to_images, recompute_global_exclusions
+from services.remote_fetch import MAX_HTML_BYTES, MAX_IMAGE_BYTES, fetch_remote
 
 router = APIRouter()
 
@@ -108,6 +118,111 @@ def extract_html_dimensions(img_tag: str) -> tuple[int | None, int | None]:
     return width, height
 
 
+def extract_best_image_url(img_tag: str) -> str:
+    """Return the best real image URL from an img tag, skipping inline placeholders."""
+    for attr in ("data-src", "data-lazy-src", "data-original", "data-pin-media", "data-large-file", "src"):
+        match = re.search(rf'{attr}=["\']([^"\']*)["\']', img_tag, re.IGNORECASE)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value and not value.lower().startswith("data:"):
+            return value
+
+    for attr in ("srcset", "data-srcset"):
+        match = re.search(rf'{attr}=["\']([^"\']*)["\']', img_tag, re.IGNORECASE)
+        if not match:
+            continue
+        candidates = [
+            part.strip().split(" ")[0].strip()
+            for part in match.group(1).split(",")
+            if part.strip()
+        ]
+        candidates = [candidate for candidate in candidates if candidate and not candidate.lower().startswith("data:")]
+        if candidates:
+            return candidates[-1]
+
+    return ""
+
+
+def extract_best_image_url_from_node(img: Any) -> str:
+    """Return the best real image URL from a parsed img node."""
+    for attr in ("data-src", "data-lazy-src", "data-original", "data-pin-media", "data-large-file", "src"):
+        value = str(img.get(attr) or "").strip()
+        if value and not value.lower().startswith("data:"):
+            return value
+
+    srcset = str(img.get("srcset") or img.get("data-srcset") or "").strip()
+    if srcset:
+        candidates = [
+            part.strip().split(" ")[0].strip()
+            for part in srcset.split(",")
+            if part.strip() and not part.strip().split(" ")[0].strip().lower().startswith("data:")
+        ]
+        if candidates:
+            return candidates[-1]
+
+    return ""
+
+
+def is_hidden_image_node(img: Any) -> bool:
+    attrs = " ".join(
+        str(value)
+        for value in [
+            img.get("class") or "",
+            img.get("style") or "",
+            img.get("loading") or "",
+            img.get("aria-hidden") or "",
+            img.get("hidden") or "",
+        ]
+    ).lower()
+    return any(
+        marker in attrs
+        for marker in [
+            "display:none",
+            "display: none",
+            "visibility:hidden",
+            "visibility: hidden",
+            "hidden",
+            "lazy-hidden",
+            "screen-reader",
+        ]
+    )
+
+
+def has_bad_image_ancestor(img: Any) -> bool:
+    """Reject images inside affiliate, ad, related-post, navigation, or widget blocks."""
+    bad_markers = [
+        "related", "recommend", "recommended", "popular", "trending", "more-post",
+        "more_post", "you-may", "you_may", "also-like", "also_like", "similar",
+        "sidebar", "widget", "footer", "header", "nav", "menu", "comment",
+        "author", "bio", "share", "social", "newsletter", "signup", "ad-",
+        " advert", "advertisement", "promo", "carousel", "swiper", "slick",
+        "roundup", "archive", "category-list", "post-grid", "card-grid",
+        "listing-item", "display-posts-listing", "featuredpost",
+        "amazon-product", "amazon-container", "amazon-image", "affiliate",
+        "faa-ob-block", "ai-no-insert", "disable-ads", "gdmtrck",
+    ]
+    parent = img
+    depth = 0
+    while parent is not None and depth < 8:
+        attrs = " ".join(
+            str(value)
+            for value in [
+                parent.get("class") or "",
+                parent.get("id") or "",
+                parent.get("href") or "",
+                parent.get("role") or "",
+                parent.get("aria-label") or "",
+                parent.name or "",
+            ]
+        ).lower()
+        if any(marker in attrs for marker in bad_markers):
+            return True
+        parent = parent.parent
+        depth += 1
+    return False
+
+
 def extract_main_content(html: str) -> str:
     """Extract only the main article content from HTML, excluding related posts, navigation, etc.
 
@@ -166,6 +281,9 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
 
     def process_img_tag(url: str, parent_classes: str = "", img_tag: str = "", skip_seen: bool = False) -> ImageScrapeResult | None:
         """Process an image URL and return ImageScrapeResult if valid."""
+        if not url or url.lower().startswith("data:"):
+            return None
+
         # Convert relative URLs to absolute
         if url.startswith("//"):
             url = "https:" + url
@@ -183,12 +301,17 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
         # Filter out small images and common non-content images
         if any(bad in url.lower() for bad in [
             "icon", "logo", "avatar", "button", "spinner",
-            "tracking", "pixel", "1x1", "ad.", "banner"
+            "tracking", "pixel", "1x1", "ad.", "banner",
+            "affiliate_id", "amazon-product", "matsato", "gdmtrck",
         ]):
             return None
 
         # Extract dimensions from HTML
         html_width, html_height = extract_html_dimensions(img_tag)
+        if html_width and html_width < 200:
+            return None
+        if html_height and html_height < 200:
+            return None
 
         # Check if WordPress content image
         is_wp_content = is_wordpress_content_image(parent_classes, img_tag)
@@ -203,14 +326,19 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
     try:
         async with httpx.AsyncClient(
             timeout=SCRAPE_PAGE_TIMEOUT_SECONDS,
-            follow_redirects=True,
+            follow_redirects=False,
             headers=HEADERS,
         ) as client:
             response = None
             for attempt in range(SCRAPE_PAGE_RETRIES + 1):
                 try:
-                    response = await client.get(page_url)
-                    response.raise_for_status()
+                    response = await fetch_remote(
+                        page_url,
+                        headers=HEADERS,
+                        timeout=SCRAPE_PAGE_TIMEOUT_SECONDS,
+                        max_bytes=MAX_HTML_BYTES,
+                        client=client,
+                    )
                     break
                 except Exception:
                     if attempt >= SCRAPE_PAGE_RETRIES:
@@ -225,46 +353,49 @@ async def scrape_page_images(page_url: str) -> List[ImageScrapeResult]:
             # Extract only the main article content (exclude related posts, navigation, etc.)
             main_content = extract_main_content(html)
 
-            # Method 1: Match figure/div with class containing img (handles nested spans)
-            # This captures figure/div/span with class before img, including deeply nested
-            img_pattern_nested = re.compile(
-                r'<((?:figure|div|p|span)[^>]*)>.*?<img([^>]*)>',
-                re.IGNORECASE | re.DOTALL
-            )
-            for match in img_pattern_nested.finditer(main_content):
-                opening_tag = match.group(1)  # e.g., 'figure class="wp-block-image"'
-                img_tag = match.group(2)  # e.g., ' src="..." width="960" height="1200"'
-
-                # Extract class/id from opening tag
-                class_match = re.search(r'class=["\']([^"\']*)["\']', opening_tag, re.IGNORECASE)
-                parent_classes = class_match.group(1) if class_match else ""
-
-                # Extract src from img tag - prefer data-src for lazy-loaded images
-                # data-src contains the actual full-res image URL, src often has a placeholder
-                data_src_match = re.search(r'data-src=["\']([^"\']*)["\']', img_tag, re.IGNORECASE)
-                if data_src_match:
-                    url = data_src_match.group(1)
-                else:
-                    src_match = re.search(r'src=["\']([^"\']*)["\']', img_tag, re.IGNORECASE)
-                    if not src_match:
+            if BeautifulSoup is not None:
+                main_soup = BeautifulSoup(main_content, "html.parser")
+                for img in main_soup.find_all("img"):
+                    if is_hidden_image_node(img):
                         continue
-                    url = src_match.group(1)
+                    if has_bad_image_ancestor(img):
+                        continue
 
-                result = process_img_tag(url, parent_classes, img_tag)
-                if result:
-                    image_results.append(result)
+                    url = extract_best_image_url_from_node(img)
+                    if not url:
+                        continue
+
+                    parent = img.find_parent(["figure", "div", "p", "span"])
+                    parent_classes = " ".join(parent.get("class", [])) if parent else ""
+                    img_tag = str(img)
+                    result = process_img_tag(url, parent_classes, img_tag)
+                    if result:
+                        image_results.append(result)
+            else:
+                # Fallback parser when BeautifulSoup is unavailable.
+                img_pattern_nested = re.compile(
+                    r'<((?:figure|div|p|span)[^>]*)>.*?<img([^>]*)>',
+                    re.IGNORECASE | re.DOTALL
+                )
+                for match in img_pattern_nested.finditer(main_content):
+                    opening_tag = match.group(1)
+                    img_tag = match.group(2)
+
+                    class_match = re.search(r'class=["\']([^"\']*)["\']', opening_tag, re.IGNORECASE)
+                    parent_classes = class_match.group(1) if class_match else ""
+
+                    url = extract_best_image_url(img_tag)
+                    if not url:
+                        continue
+
+                    result = process_img_tag(url, parent_classes, img_tag)
+                    if result:
+                        image_results.append(result)
 
     except Exception as e:
         print(f"Error scraping {page_url}: {e}")
 
-    # Deduplicate while preserving order (keep first occurrence which has more context)
-    seen = set()
-    unique_results = []
-    for img_result in image_results:
-        if img_result.url not in seen:
-            seen.add(img_result.url)
-            unique_results.append(img_result)
-
+    unique_results = dedupe_image_variants(image_results, lambda result: result.url)
     return unique_results[:20]  # Limit to 20 images per page
 
 
@@ -275,10 +406,13 @@ async def scrape_page_into_db(
     pre_scrape_results: list[ImageScrapeResult] | None = None,
 ) -> list[PageImage]:
     """Scrape a page and persist its images with classification metadata."""
-    db.query(PageImage).filter(PageImage.page_id == page.id).delete()
-
     rules = global_rules if global_rules is not None else db.query(GlobalExcludedImage).all()
     scrape_results = pre_scrape_results if pre_scrape_results is not None else await scrape_page_images(page.url)
+    existing_images = db.query(PageImage).filter(PageImage.page_id == page.id).all()
+    existing_usable = any(
+        not image.is_excluded and not image.excluded_by_global_rule
+        for image in existing_images
+    )
 
     images: list[PageImage] = []
     semaphore = asyncio.Semaphore(METADATA_CONCURRENCY_PER_PAGE)
@@ -339,8 +473,19 @@ async def scrape_page_into_db(
             category=classification.category,
             excluded_by_global_rule=excluded_by_global,
         )
-        db.add(img)
         images.append(img)
+
+    new_usable = any(
+        not image.is_excluded and not image.excluded_by_global_rule
+        for image in images
+    )
+
+    if images and (new_usable or not existing_usable):
+        db.query(PageImage).filter(PageImage.page_id == page.id).delete()
+        for img in images:
+            db.add(img)
+    else:
+        images = existing_images
 
     page.scraped_at = datetime.utcnow()
     db.commit()
@@ -512,11 +657,18 @@ def list_image_pages(
 async def proxy_image(url: str):
     """Proxy remote images so frontend canvas preview avoids CORS issues."""
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=HEADERS) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "image/jpeg")
-            return Response(content=response.content, media_type=content_type)
+        response = await fetch_remote(
+            url,
+            headers=HEADERS,
+            timeout=30.0,
+            max_bytes=MAX_IMAGE_BYTES,
+        )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Remote URL did not return an image")
+        return Response(content=response.content, media_type=content_type)
+    except HTTPException:
+        raise
     except Exception as error:
         raise HTTPException(status_code=400, detail=f"Failed to proxy image: {error}")
 

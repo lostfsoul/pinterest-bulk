@@ -357,7 +357,7 @@ function Layout({
       )}
 
       {/* Desktop Sidebar */}
-      <aside className="hidden lg:flex w-72 bg-white border-r border-slate-200 p-5 flex-col">
+      <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col overflow-y-auto border-r border-slate-200 bg-white p-5 lg:flex">
         <div className="mb-7">
           <h1 className="text-lg font-semibold tracking-tight">Pinterest Pin Tool</h1>
           <p className="mt-1 text-xs text-slate-500">Content operations dashboard</p>

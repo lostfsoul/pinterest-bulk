@@ -33,11 +33,15 @@ frontend/.vite/
 backend/static/
 data/*.db
 data/*.db-journal
+data/*.db-shm
+data/*.db-wal
+data/*.db.backup_*
 backend/storage/images/*
 backend/storage/templates/*
 backend/storage/exports/*
 storage/generated_pins/*
 storage/overlays/*
+storage/backups/*
 !backend/storage/images/.gitkeep
 !backend/storage/templates/.gitkeep
 !backend/storage/exports/.gitkeep

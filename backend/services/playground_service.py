@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session, joinedload
 from models import CustomFont, Page, SEOKeyword, Template, Website
 from services.ai_generation import DEFAULT_OPENAI_MODEL, call_model
 from routers.images import extract_main_content, is_wordpress_content_image
+from services.image_dedupe import canonical_image_url_key, image_variant_score
+from services.remote_fetch import MAX_HTML_BYTES, MAX_METADATA_BYTES, fetch_remote
 
 
 PROMPT_STYLE_TEXT: dict[str, str] = {
@@ -301,7 +303,11 @@ def _best_img_src(img: Any) -> str:
             return value
     srcset = str(img.get("srcset") or img.get("data-srcset") or "").strip()
     if srcset:
-        candidates = [part.strip().split(" ")[0] for part in srcset.split(",") if part.strip()]
+        candidates = [
+            part.strip().split(" ")[0]
+            for part in srcset.split(",")
+            if part.strip() and not part.strip().split(" ")[0].lower().startswith("data:")
+        ]
         if candidates:
             return candidates[-1]
     return ""
@@ -341,6 +347,9 @@ def _has_bad_image_ancestor(img: Any) -> bool:
         "author", "bio", "share", "social", "newsletter", "signup", "ad-",
         " advert", "advertisement", "promo", "carousel", "swiper", "slick",
         "roundup", "archive", "category-list", "post-grid", "card-grid",
+        "listing-item", "display-posts-listing", "featuredpost",
+        "amazon-product", "amazon-container", "amazon-image", "affiliate",
+        "faa-ob-block", "ai-no-insert", "disable-ads", "gdmtrck",
     ]
     parent = img
     depth = 0
@@ -350,6 +359,7 @@ def _has_bad_image_ancestor(img: Any) -> bool:
             for value in [
                 parent.get("class") or "",
                 parent.get("id") or "",
+                parent.get("href") or "",
                 parent.get("role") or "",
                 parent.get("aria-label") or "",
                 parent.name or "",
@@ -364,10 +374,14 @@ def _has_bad_image_ancestor(img: Any) -> bool:
 
 async def _looks_large_enough(url: str, client: httpx.AsyncClient) -> bool:
     try:
-        response = await client.head(url, timeout=4.0, follow_redirects=True)
-        if response.status_code >= 400:
-            return False
-        content_length = _extract_content_length(dict(response.headers))
+        response = await fetch_remote(
+            url,
+            method="HEAD",
+            timeout=4.0,
+            max_bytes=MAX_METADATA_BYTES,
+            client=client,
+        )
+        content_length = _extract_content_length(response.headers)
         if content_length > 0 and content_length < 8_000:
             return False
         return True
@@ -390,9 +404,14 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
-        response = await client.get(normalized_url)
-        response.raise_for_status()
+    async with httpx.AsyncClient(headers=headers, follow_redirects=False, timeout=30.0) as client:
+        response = await fetch_remote(
+            normalized_url,
+            headers=headers,
+            timeout=30.0,
+            max_bytes=MAX_HTML_BYTES,
+            client=client,
+        )
         html = response.text
         og_title = ""
         og_desc = ""
@@ -474,7 +493,12 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                     "height": height,
                     "is_content_image": is_content_image,
                     "relevance_score": relevance_score,
-                    "score": (width * height) + (1_000_000 if is_content_image else 0) + (relevance_score * 2_000_000),
+                    "score": (
+                        (width * height)
+                        + (1_000_000 if is_content_image else 0)
+                        + (relevance_score * 2_000_000)
+                        + image_variant_score(absolute)
+                    ),
                 })
         else:
             import re
@@ -487,7 +511,6 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
             og_title = _meta("og:title")
             og_desc = _meta("og:description")
             og_image = _meta("og:image")
-
             h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", html, flags=re.IGNORECASE | re.DOTALL)
             title_match = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
             p_match = re.search(r"<p[^>]*>(.*?)</p>", html, flags=re.IGNORECASE | re.DOTALL)
@@ -504,11 +527,6 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                 seen.add(absolute)
                 image_candidates.append({"url": absolute, "width": 0, "height": 0, "score": 0})
 
-        relevant_candidates = [
-            item for item in image_candidates
-            if item.get("relevance_score", 0) > 0 or item.get("is_content_image")
-        ]
-        image_candidates = relevant_candidates or image_candidates
         image_candidates.sort(key=lambda item: item["score"], reverse=True)
 
         images: list[str] = []
@@ -518,20 +536,26 @@ async def scrape_page_images(url: str) -> dict[str, Any]:
                 images.append(og_abs)
 
         head_checks = 0
+        seen_image_keys: set[str] = set()
         for candidate in image_candidates:
             if len(images) >= 10:
                 break
             candidate_url = str(candidate["url"])
             if candidate_url in images:
                 continue
+            image_key = canonical_image_url_key(candidate_url)
+            if image_key in seen_image_keys:
+                continue
             if candidate.get("width", 0) >= 200:
                 images.append(candidate_url)
+                seen_image_keys.add(image_key)
                 continue
             if head_checks >= 8:
                 break
             head_checks += 1
             if await _looks_large_enough(candidate_url, client):
                 images.append(candidate_url)
+                seen_image_keys.add(image_key)
 
         payload = {
             "images": images[:10],
