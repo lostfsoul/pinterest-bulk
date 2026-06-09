@@ -9,8 +9,10 @@ if str(BACKEND_DIR) not in sys.path:
 
 from services.trend_ranking import _derive_active_period, rank_pages_for_trends  # noqa: E402
 from routers.pins import (  # noqa: E402
+    assign_board_name,
     generate_pin_description,
     normalize_generation_keywords,
+    sanitize_generated_text,
     select_keywords_for_generation,
 )
 
@@ -134,6 +136,67 @@ class SEOKeywordGenerationTests(unittest.TestCase):
 
         self.assertIn("quick dinner", description)
         self.assertNotIn("Keywords:", description)
+
+
+class BoardAssignmentTests(unittest.TestCase):
+    BOARDS = [
+        "Easy Dinner Recipes",
+        "Pasta Recipes",
+        "Healthy Recipes",
+        "Dessert Recipes",
+        "Easy Baking Recipes",
+        "Italian Recipes",
+        "Salad Recipes",
+        "Vegetarian Recipes",
+        "Summer Recipes",
+    ]
+
+    def assign(self, title: str) -> str:
+        item = page(1, title)
+        return assign_board_name(
+            page=item,
+            board_candidates=self.BOARDS,
+            keywords=[],
+            ai_suggestion="",
+            fallback=self.BOARDS[0],
+        )
+
+    def test_italian_dessert_uses_dessert_board(self) -> None:
+        self.assertEqual(
+            self.assign("Tiramisu alle fragole senza cottura fresco e delizioso"),
+            "Dessert Recipes",
+        )
+
+    def test_italian_pasta_uses_pasta_board(self) -> None:
+        self.assertEqual(
+            self.assign("Pasta fredda con salmone e rucola fresca e gustosa"),
+            "Pasta Recipes",
+        )
+
+    def test_italian_salad_uses_salad_board(self) -> None:
+        self.assertEqual(
+            self.assign("Insalata di ceci con rucola fresca e ricca di nutrienti"),
+            "Salad Recipes",
+        )
+
+    def test_exact_ai_candidate_still_has_priority(self) -> None:
+        item = page(1, "Tiramisu alle fragole")
+        self.assertEqual(
+            assign_board_name(
+                page=item,
+                board_candidates=self.BOARDS,
+                keywords=[],
+                ai_suggestion="Easy Baking Recipes",
+                fallback=self.BOARDS[0],
+            ),
+            "Easy Baking Recipes",
+        )
+
+    def test_percent_encoded_emoji_is_not_exported_as_text(self) -> None:
+        self.assertEqual(
+            sanitize_generated_text("Rotoli al limone %F0%9F%8D%8B"),
+            "Rotoli al limone",
+        )
 
 
 if __name__ == "__main__":

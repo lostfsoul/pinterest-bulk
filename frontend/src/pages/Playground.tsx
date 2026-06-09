@@ -528,8 +528,8 @@ export default function Playground() {
         </CardHeader>
       </Card>
 
-      <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_520px]">
-        <Card className="h-auto xl:h-[calc(100vh-210px)]">
+      <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_520px]">
+        <Card className="h-auto min-w-0 overflow-hidden xl:h-[calc(100vh-210px)]">
           <CardContent className="max-h-none p-3 pt-3 xl:h-full xl:overflow-y-auto">
             <LeftPanel
               pages={pages}

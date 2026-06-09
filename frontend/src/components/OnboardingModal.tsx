@@ -817,7 +817,7 @@ export default function OnboardingModal({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
+        <DialogContent className="max-h-[92vh] min-w-0 overflow-x-hidden overflow-y-auto sm:max-w-5xl">
           <DialogHeader>
             <DialogTitle>Onboarding</DialogTitle>
             <DialogDescription>
@@ -920,7 +920,7 @@ export default function OnboardingModal({
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                   <span>{selectedPageIds.size} of {pages.length} selected</span>
                   <div className="flex gap-2">
                     <Button size="sm" variant="secondary" onClick={() => setPagesSelection(filteredPages.map((page) => page.id), true)}>Enable Visible</Button>
@@ -938,8 +938,8 @@ export default function OnboardingModal({
                     const collapsed = collapsedGroups.has(group.key);
                     return (
                       <div key={group.key} className="border-b border-slate-200 last:border-b-0">
-                        <div className="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2">
-                          <div className="flex min-w-0 items-center gap-2">
+                        <div className="flex min-w-0 items-center justify-between gap-2 bg-slate-50 px-3 py-2">
+                          <div className="flex min-w-0 flex-1 items-center gap-2">
                             <input
                               type="checkbox"
                               className="h-4 w-4"
@@ -948,12 +948,13 @@ export default function OnboardingModal({
                             />
                             <button
                               type="button"
-                              className="truncate text-left text-sm font-medium text-slate-900"
+                              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-slate-900"
+                              title={group.label}
                               onClick={() => setPagesSelection(group.pages.map((page) => page.id), !fullySelected)}
                             >
                               {group.label}
                             </button>
-                            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
+                            <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] text-slate-700">
                               {selectedInGroup}/{group.pages.length} selected
                             </span>
                           </div>
@@ -973,12 +974,16 @@ export default function OnboardingModal({
                           </button>
                         </div>
                         {!collapsed && group.pages.map((page) => (
-                          <label key={page.id} className="flex items-center justify-between gap-3 border-t border-slate-100 px-3 py-2">
+                          <label key={page.id} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1 border-t border-slate-100 px-3 py-2 md:grid-cols-[minmax(0,1fr)_minmax(12rem,20rem)] md:items-center md:gap-3">
                             <span className="flex min-w-0 items-center gap-2">
-                              <input type="checkbox" checked={selectedPageIds.has(page.id)} onChange={() => togglePage(page.id)} />
-                              <span className="truncate text-sm text-slate-700">{page.title || page.url}</span>
+                              <input className="shrink-0" type="checkbox" checked={selectedPageIds.has(page.id)} onChange={() => togglePage(page.id)} />
+                              <span className="min-w-0 flex-1 truncate text-sm text-slate-700" title={page.title || page.url}>
+                                {page.title || page.url}
+                              </span>
                             </span>
-                            <span className="hidden max-w-xs shrink-0 truncate text-xs text-slate-500 md:block">{page.url}</span>
+                            <span className="min-w-0 truncate pl-6 text-xs text-slate-500 md:pl-0" title={page.url}>
+                              {page.url}
+                            </span>
                           </label>
                         ))}
                       </div>
@@ -997,7 +1002,9 @@ export default function OnboardingModal({
                       This uses real images from one selected page and becomes the default template for first generation.
                     </p>
                     {previewPage && (
-                      <p className="mt-1 text-xs text-slate-500">Previewing: {previewPage.title || previewPage.url}</p>
+                      <p className="mt-1 max-w-full break-words text-xs text-slate-500">
+                        Previewing: <span className="break-all" title={previewPage.url}>{previewPage.title || previewPage.url}</span>
+                      </p>
                     )}
                   </div>
                   <div className="flex flex-wrap gap-2">

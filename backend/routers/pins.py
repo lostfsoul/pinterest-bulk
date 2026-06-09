@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -1040,7 +1040,7 @@ def sanitize_generated_text(value: str | None) -> str:
     if not value:
         return ""
 
-    cleaned = value.replace("\uFFFD", " ")
+    cleaned = unquote(value).replace("\uFFFD", " ")
     cleaned = cleaned.replace("\r", " ").replace("\n", " ")
     cleaned = re.sub(r"[\x00-\x1F\x7F-\x9F]", " ", cleaned)
     cleaned = re.sub(r"[^\x20-\x7E]", " ", cleaned)
@@ -1482,9 +1482,117 @@ def apply_generation_image_filters(images: list[PageImage], site_settings: dict 
 
 
 def _tokenize_for_board(value: str | None) -> set[str]:
-    text = (value or "").lower()
+    text = unquote(value or "").lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return {token for token in text.split() if len(token) > 2}
+
+
+_BOARD_TOPIC_RULES: dict[str, dict[str, tuple[str, ...] | int]] = {
+    "dessert": {
+        "board_terms": ("dessert", "baking", "holiday"),
+        "page_terms": (
+            "dessert", "dolce", "dolci", "torta", "torte", "tiramisu", "crostatina",
+            "crostatine", "crostata", "pie", "cake", "biscotti", "cookie", "cookies",
+            "meringue", "crema caffe", "pasticcera", "limoncello",
+        ),
+        "weight": 100,
+    },
+    "pasta": {
+        "board_terms": ("pasta",),
+        "page_terms": ("pasta", "spaghetti", "gnocchi", "lasagna", "lasagne", "ravioli", "tagliatelle"),
+        "weight": 100,
+    },
+    "salad": {
+        "board_terms": ("salad",),
+        "page_terms": ("salad", "insalata", "insalate"),
+        "weight": 100,
+    },
+    "soup": {
+        "board_terms": ("soup",),
+        "page_terms": ("soup", "zuppa", "minestra", "vellutata"),
+        "weight": 100,
+    },
+    "breakfast": {
+        "board_terms": ("breakfast",),
+        "page_terms": ("breakfast", "colazione", "pancake", "waffle", "frittata", "omelette"),
+        "weight": 95,
+    },
+    "chicken": {
+        "board_terms": ("chicken",),
+        "page_terms": ("chicken", "pollo", "tacchino"),
+        "weight": 95,
+    },
+    "air_fryer": {
+        "board_terms": ("air fryer",),
+        "page_terms": ("air fryer", "friggitrice ad aria"),
+        "weight": 110,
+    },
+    "slow_cooker": {
+        "board_terms": ("slow cooker",),
+        "page_terms": ("slow cooker", "crockpot", "cottura lenta"),
+        "weight": 110,
+    },
+    "one_pot": {
+        "board_terms": ("one pot",),
+        "page_terms": ("one pot", "one pan", "una pentola"),
+        "weight": 90,
+    },
+    "appetizer": {
+        "board_terms": ("appetizer",),
+        "page_terms": ("appetizer", "antipasto", "antipasti", "finger food", "bruschetta", "crostini", "involtini"),
+        "weight": 80,
+    },
+    "vegetarian": {
+        "board_terms": ("vegetarian",),
+        "page_terms": (
+            "vegetarian", "vegetariano", "vegetariana", "zucchine", "melanzane",
+            "ceci", "lenticchie", "fagioli", "tofu", "verdure", "pomodorini", "pomodoro",
+        ),
+        "weight": 55,
+    },
+    "healthy": {
+        "board_terms": ("healthy", "high protein"),
+        "page_terms": (
+            "healthy", "salutare", "leggero", "leggera", "proteico", "proteica",
+            "ricca di nutrienti", "senza farina", "ceci", "rucola",
+        ),
+        "weight": 45,
+    },
+    "summer": {
+        "board_terms": ("summer",),
+        "page_terms": ("summer", "estate", "estiva", "estivo", "fresco", "fresca", "fredda", "fragole"),
+        "weight": 35,
+    },
+    "quick": {
+        "board_terms": ("quick weeknight", "30 minute"),
+        "page_terms": ("quick", "veloce", "facile", "30 minute", "30 minuti"),
+        "weight": 35,
+    },
+    "meal_prep": {
+        "board_terms": ("meal prep",),
+        "page_terms": ("meal prep", "preparare in anticipo", "make ahead"),
+        "weight": 75,
+    },
+}
+
+
+def _normalize_board_text(value: str | None) -> str:
+    text = unquote(value or "").lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", text)).strip()
+
+
+def _multilingual_board_score(candidate: str, page_text: str) -> int:
+    candidate_text = _normalize_board_text(candidate)
+    score = 0
+    for rule in _BOARD_TOPIC_RULES.values():
+        board_terms = rule["board_terms"]
+        page_terms = rule["page_terms"]
+        if not any(term in candidate_text for term in board_terms):
+            continue
+        matches = sum(1 for term in page_terms if term in page_text)
+        if matches:
+            score += int(rule["weight"]) + min(matches - 1, 3) * 10
+    return score
 
 
 def normalize_board_candidates(values: list[str]) -> list[str]:
@@ -1548,7 +1656,17 @@ def assign_board_name(
         if exact:
             return exact
 
-    page_tokens = _tokenize_for_board(page.title) | _tokenize_for_board(page.section) | _tokenize_for_board(page.url)
+    page_text = _normalize_board_text(" ".join([
+        getattr(page, "title", None) or "",
+        getattr(page, "section", None) or "",
+        getattr(page, "url", None) or "",
+        *keywords,
+    ]))
+    page_tokens = (
+        _tokenize_for_board(getattr(page, "title", None))
+        | _tokenize_for_board(getattr(page, "section", None))
+        | _tokenize_for_board(getattr(page, "url", None))
+    )
     for keyword in keywords:
         page_tokens |= _tokenize_for_board(keyword)
 
@@ -1557,7 +1675,8 @@ def assign_board_name(
     best_score = -1
     for candidate in normalized_candidates:
         candidate_tokens = _tokenize_for_board(candidate)
-        score = len(candidate_tokens & page_tokens) * 10
+        score = _multilingual_board_score(candidate, page_text)
+        score += len(candidate_tokens & page_tokens) * 10
         if suggestion_tokens:
             score += len(candidate_tokens & suggestion_tokens) * 5
         if score > best_score:

@@ -83,7 +83,7 @@ export default function LeftPanel({
   }
 
   return (
-    <div className="h-full space-y-3 overflow-y-auto pr-1">
+    <div className="h-full min-w-0 space-y-3 overflow-x-hidden overflow-y-auto pr-1">
       <SelectPage
         pages={pages}
         selectedPageUrl={selectedPageUrl}
