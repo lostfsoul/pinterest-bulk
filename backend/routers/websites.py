@@ -29,6 +29,7 @@ from schemas import (
     TrendKeywordResponse,
 )
 from services.sitemap import import_sitemap, fetch_sitemap_groups
+from services.language_detection import detect_website_language
 
 router = APIRouter()
 
@@ -283,18 +284,23 @@ def list_websites(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=WebsiteResponse, status_code=status.HTTP_201_CREATED)
-def create_website(website: WebsiteCreate, db: Session = Depends(get_db)):
+async def create_website(website: WebsiteCreate, db: Session = Depends(get_db)):
     """Create a new website. Auto-detects sitemap URL if not provided."""
     normalized_url = _normalize_website_url(website.url)
     if not normalized_url:
         raise HTTPException(status_code=400, detail="Website URL is required")
     sitemap_url = _derive_sitemap_url(normalized_url, website.sitemap_url)
+    detected_language = await detect_website_language(normalized_url, website.name)
+    generation_settings = _default_generation_settings(onboarding_required=True)
+    language = detected_language or "English"
+    generation_settings["ai"]["language"] = language
+    generation_settings["ai"]["language_source"] = "openai" if detected_language else "fallback"
 
     db_website = Website(
         name=website.name,
         url=normalized_url,
         sitemap_url=sitemap_url,
-        generation_settings=_default_generation_settings(onboarding_required=True),
+        generation_settings=generation_settings,
     )
     db.add(db_website)
     db.commit()

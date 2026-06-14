@@ -459,7 +459,16 @@ def _generate_pin_drafts(
         monthly_limit_enabled = bool(content_settings.get("monthly_limit_enabled", False))
         monthly_limit_count = int(content_settings.get("monthly_limit_count", 0) or 0)
         no_link_pins = bool(content_settings.get("no_link_pins", False))
-        page_language = requested_language or default_language
+        website_ai_settings = (
+            site_settings.get("ai", {})
+            if isinstance(site_settings, dict) and isinstance(site_settings.get("ai"), dict)
+            else {}
+        )
+        page_language = (
+            requested_language
+            or str(website_ai_settings.get("language") or "").strip()
+            or default_language
+        )
 
         effective_image_settings = _resolve_effective_image_settings(site_settings, request.image_settings or None)
         _, images = _generation_images_for_page(db, page, effective_image_settings)
@@ -1691,6 +1700,116 @@ def assign_board_name(
     return best_name
 
 
+def _regenerate_pin_ai_content(
+    db: Session,
+    *,
+    page: Page,
+    website: Website,
+    pin: PinDraft,
+    ai_settings_override: dict | None = None,
+) -> dict[str, str]:
+    """Regenerate one pin using the configured production AI presets."""
+    ai_settings = db.query(AISettings).first()
+    if not ai_settings:
+        raise HTTPException(
+            status_code=400,
+            detail="AI settings are not configured. Configure the default AI presets first.",
+        )
+
+    presets = {
+        target: get_preset_for_target(db, target, settings=ai_settings)
+        for target in ("title", "description", "board")
+    }
+    missing_presets = [target for target, preset in presets.items() if preset is None]
+    if missing_presets:
+        missing = ", ".join(missing_presets)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing default AI preset(s): {missing}. Configure them in AI Presets first.",
+        )
+
+    site_settings = website.generation_settings if isinstance(website.generation_settings, dict) else {}
+    website_ai = site_settings.get("ai") if isinstance(site_settings.get("ai"), dict) else {}
+    overrides = ai_settings_override if isinstance(ai_settings_override, dict) else {}
+    generation_language = (
+        str(overrides.get("language") or "").strip()
+        or str(website_ai.get("language") or "").strip()
+        or str(ai_settings.default_language or "").strip()
+        or "English"
+    )
+
+    seo_keywords = _load_seo_keywords_by_url(db, [page.url])
+    keywords = select_keywords_for_generation(seo_keywords.get(page.url, []))
+    tone = str(overrides.get("tone") or website_ai.get("tone") or "seo-friendly")
+    cta_style = str(
+        overrides.get("cta_style")
+        or overrides.get("ctaStyle")
+        or website_ai.get("cta_style")
+        or "soft"
+    )
+    title_max = int(overrides.get("title_max") or overrides.get("titleMax") or website_ai.get("title_max") or 100)
+    description_max = int(
+        overrides.get("description_max")
+        or overrides.get("descriptionMax")
+        or website_ai.get("description_max")
+        or 500
+    )
+
+    titles = generate_pin_titles(
+        page,
+        keywords,
+        1,
+        True,
+        preset=presets["title"],
+        language=generation_language,
+        website_name=website.name,
+        tone=tone,
+        cta_style=cta_style,
+        title_max=title_max,
+    )
+    title = titles[0] if titles else (pin.title or page.title or "")
+    description = generate_description_ai(
+        page,
+        keywords,
+        preset=presets["description"],
+        language=generation_language,
+        website_name=website.name,
+        tone=tone,
+        cta_style=cta_style,
+        description_max=description_max,
+        generate_descriptions=True,
+    )
+
+    board_candidates = extract_board_candidates(site_settings)
+    default_board = pin.board_name or (board_candidates[0] if board_candidates else "General")
+    board_suggestion = generate_board_name_ai(
+        page,
+        keywords,
+        preset=presets["board"],
+        language=generation_language,
+        default_board=default_board,
+        website_name=website.name,
+        board_list=board_candidates,
+    )
+    board_name = (
+        assign_board_name(
+            page,
+            board_candidates,
+            keywords,
+            board_suggestion,
+            default_board,
+        )
+        if board_candidates
+        else board_suggestion
+    )
+
+    return {
+        "title": sanitize_generated_text(title),
+        "description": sanitize_generated_text(description),
+        "board_name": sanitize_generated_text(board_name),
+    }
+
+
 @router.post("/preview", response_model=GenerationPreviewResponse)
 def preview_generation(
     request: GenerationPreviewRequest,
@@ -2173,19 +2292,16 @@ def regenerate_pin_preview(
     description = pin.description or ""
     board_name = pin.board_name or "General"
     if request.regenerate_ai_content:
-        try:
-            from services.playground_service import generate_ai_preview_content
-
-            generated = generate_ai_preview_content(
-                db=db,
-                website_id=website.id,
-                page_url=page.url,
-                ai_settings_override=request.ai_settings if isinstance(request.ai_settings, dict) else None,
-            )
-            title = generated.get("title") or title
-            description = generated.get("description") or description
-        except Exception:
-            pass
+        generated = _regenerate_pin_ai_content(
+            db,
+            page=page,
+            website=website,
+            pin=pin,
+            ai_settings_override=request.ai_settings,
+        )
+        title = generated["title"] or title
+        description = generated["description"] or description
+        board_name = generated["board_name"] or board_name
 
     return {
         "pin_id": pin.id,

@@ -204,7 +204,15 @@ def generate_ai_preview_content(
     ai_settings = ai_settings_override if isinstance(ai_settings_override, dict) else stored_ai_settings
 
     title_base = (page.title or page.url).strip()
-    language = _clean_text(ai_settings.get("language")) or "English"
+    website_ai = settings.get("ai") if isinstance(settings.get("ai"), dict) else {}
+    language = (
+        _clean_text(ai_settings_override.get("language")) if isinstance(ai_settings_override, dict) else ""
+    ) or (
+        _clean_text(website_ai.get("language"))
+        or _clean_text(stored_ai_settings.get("language"))
+        or "English"
+    )
+    ai_settings = {**ai_settings, "language": language}
     custom_prompt = _clean_text(ai_settings.get("customPrompt"))
     prompt_enabled = bool(ai_settings.get("promptEnabled", True))
     style = _normalize_prompt_style(ai_settings.get("promptStyle"))

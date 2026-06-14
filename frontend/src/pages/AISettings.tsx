@@ -6,7 +6,10 @@ import { PlaceholderButtons } from '../components/PlaceholderButtons';
 
 const LANGUAGES = [
   'English', 'Spanish', 'French', 'German', 'Portuguese', 'Italian',
-  'Dutch', 'Polish', 'Japanese', 'Korean', 'Chinese', 'Arabic', 'Hindi'
+  'Dutch', 'Polish', 'Czech', 'Slovak', 'Romanian', 'Hungarian',
+  'Croatian', 'Bulgarian', 'Greek', 'Russian', 'Ukrainian', 'Turkish',
+  'Danish', 'Swedish', 'Norwegian', 'Finnish', 'Indonesian', 'Vietnamese',
+  'Thai', 'Hebrew', 'Japanese', 'Korean', 'Chinese', 'Arabic', 'Hindi'
 ];
 
 const TARGET_FIELD_OPTIONS = [
@@ -65,6 +68,13 @@ function readBoardCandidatesFromSettings(settings: Record<string, unknown>): str
     : [];
 }
 
+function readWebsiteLanguage(settings: Record<string, unknown>): string {
+  const ai = settings.ai && typeof settings.ai === 'object'
+    ? settings.ai as Record<string, unknown>
+    : {};
+  return String(ai.language || 'English');
+}
+
 function mergeBoardCandidatesIntoSettings(
   settings: Record<string, unknown>,
   boardCandidates: string[],
@@ -108,6 +118,7 @@ export default function AISettings() {
   const [websites, setWebsites] = useState<Website[]>([]);
   const [activeWebsiteId, setActiveWebsiteId] = useState<number | null>(null);
   const [websiteSettingsRaw, setWebsiteSettingsRaw] = useState<Record<string, unknown> | null>(null);
+  const [websiteLanguage, setWebsiteLanguage] = useState('English');
   const [boardCandidates, setBoardCandidates] = useState<string[]>([]);
   const [boardCandidateInput, setBoardCandidateInput] = useState('');
   const [boardSaving, setBoardSaving] = useState(false);
@@ -133,6 +144,7 @@ export default function AISettings() {
   useEffect(() => {
     if (!activeWebsiteId) {
       setWebsiteSettingsRaw(null);
+      setWebsiteLanguage('English');
       setBoardCandidates([]);
       return;
     }
@@ -170,10 +182,12 @@ export default function AISettings() {
       const response = await apiClient.getWebsiteGenerationSettings(websiteId);
       const nextRaw = (response.data.settings || {}) as Record<string, unknown>;
       setWebsiteSettingsRaw(nextRaw);
+      setWebsiteLanguage(readWebsiteLanguage(nextRaw));
       setBoardCandidates(readBoardCandidatesFromSettings(nextRaw));
     } catch (error) {
       console.error('Failed to load website generation settings:', error);
       setWebsiteSettingsRaw({});
+      setWebsiteLanguage('English');
       setBoardCandidates([]);
     }
   }
@@ -259,6 +273,32 @@ export default function AISettings() {
     }
   }
 
+  async function persistWebsiteLanguage(language: string) {
+    if (!activeWebsiteId) return;
+    const previous = websiteLanguage;
+    setWebsiteLanguage(language);
+    try {
+      let base = websiteSettingsRaw;
+      if (!base) {
+        const response = await apiClient.getWebsiteGenerationSettings(activeWebsiteId);
+        base = (response.data.settings || {}) as Record<string, unknown>;
+      }
+      const aiBase = base?.ai && typeof base.ai === 'object'
+        ? base.ai as Record<string, unknown>
+        : {};
+      const nextSettings = {
+        ...(base || {}),
+        ai: { ...aiBase, language, language_source: 'manual' },
+      };
+      await apiClient.updateWebsiteGenerationSettings(activeWebsiteId, nextSettings);
+      setWebsiteSettingsRaw(nextSettings);
+    } catch (error) {
+      console.error('Failed to save website language:', error);
+      setWebsiteLanguage(previous);
+      alert('Failed to save website language');
+    }
+  }
+
   async function addBoardCandidatesFromInput() {
     const candidates = boardCandidateInput
       .split(/[,\n]+/)
@@ -338,22 +378,10 @@ export default function AISettings() {
         <p className="text-gray-500 mt-1">Manage AI prompt presets for generating titles, descriptions, and board names</p>
       </div>
 
-      {/* Global Settings */}
+      {/* Shared preset settings */}
       <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h2 className="font-semibold text-gray-900 mb-4">Global Settings</h2>
+        <h2 className="font-semibold text-gray-900 mb-4">Shared AI Defaults</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Default Language</label>
-            <select
-              value={settings?.default_language || 'English'}
-              onChange={(e) => handleUpdateSettings('default_language', e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md"
-            >
-              {LANGUAGES.map(lang => (
-                <option key={lang} value={lang}>{lang}</option>
-              ))}
-            </select>
-          </div>
           <div className="flex items-center pt-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -420,16 +448,16 @@ export default function AISettings() {
         </div>
       </div>
 
-      {/* Per-Website Board Candidates */}
+      {/* Per-website AI settings */}
       <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
         <div>
-          <h2 className="font-semibold text-gray-900">Board Candidates (Per Website)</h2>
+          <h2 className="font-semibold text-gray-900">Website AI Settings</h2>
           <p className="text-sm text-gray-500 mt-1">
-            AI board preset must pick from this list for the selected website. If empty, generation falls back to <strong>General</strong>.
+            Language is detected when the website is added and can be corrected here. Board generation is limited to this website's list.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
+        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(180px,0.5fr)_auto] gap-3 items-end">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Website</label>
             <select
@@ -450,6 +478,19 @@ export default function AISettings() {
               ))}
             </select>
           </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Generation Language</label>
+            <select
+              value={websiteLanguage}
+              onChange={(e) => void persistWebsiteLanguage(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+              disabled={!activeWebsiteId}
+            >
+              {LANGUAGES.map(lang => (
+                <option key={lang} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </div>
           <Button
             variant="secondary"
             onClick={saveBoardCandidates}
@@ -459,6 +500,9 @@ export default function AISettings() {
           </Button>
         </div>
 
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Board Candidates</label>
+        </div>
         <div className="flex gap-2">
           <textarea
             value={boardCandidateInput}

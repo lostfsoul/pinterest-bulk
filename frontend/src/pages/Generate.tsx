@@ -601,7 +601,7 @@ export default function Generate() {
                     checked={regenAiContent}
                     onChange={(event) => setRegenAiContent(event.target.checked)}
                   />
-                  Regenerate AI title/description
+                  Regenerate AI title, description, and board
                 </label>
                 <Button
                   variant="outline"
