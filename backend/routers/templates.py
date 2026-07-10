@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import CustomFont, Template, TemplateZone
+from models import CustomFont, GenerationJob, PinDraft, Template, TemplateZone
 from schemas import (
     TemplateDetectionFinalizeRequest,
     TemplateDetectionStartRequest,
@@ -467,6 +467,18 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
         overlay_path = OVERLAYS_DIR / template.overlay_svg
         if overlay_path.exists():
             overlay_path.unlink()
+
+    # Detach dependent rows before deleting: pin_drafts.template_id and
+    # generation_jobs.template_id have no ON DELETE rule, and PRAGMA
+    # foreign_keys=ON, so orphan refs would otherwise raise FK violations
+    # and block deletion. Null them out (both columns are nullable) to
+    # preserve the user's generated pins/jobs.
+    db.query(PinDraft).filter(PinDraft.template_id == template_id).update(
+        {PinDraft.template_id: None}
+    )
+    db.query(GenerationJob).filter(GenerationJob.template_id == template_id).update(
+        {GenerationJob.template_id: None}
+    )
 
     db.delete(template)
     db.commit()
