@@ -31,6 +31,9 @@ class Website(Base):
     trend_keywords: Mapped[list["WebsiteTrendKeyword"]] = relationship(
         "WebsiteTrendKeyword", back_populates="website", cascade="all, delete-orphan"
     )
+    generation_jobs: Mapped[list["GenerationJob"]] = relationship(
+        "GenerationJob", back_populates="website", cascade="all, delete-orphan"
+    )
 
 
 class Page(Base):
@@ -309,6 +312,8 @@ class GenerationJob(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    website: Mapped["Website"] = relationship("Website", back_populates="generation_jobs")
 
 
 class AIPromptPreset(Base):

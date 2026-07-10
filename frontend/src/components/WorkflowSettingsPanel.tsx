@@ -36,6 +36,7 @@ type WorkflowForm = {
   monthly_limit_enabled: boolean;
   monthly_limit_count: number;
   floating_days: boolean;
+  floating_days_variance: number;
   randomize_posting_times: boolean;
   max_floating_minutes: number;
   no_link_pins: boolean;
@@ -58,6 +59,7 @@ const DEFAULT_FORM: WorkflowForm = {
   monthly_limit_enabled: false,
   monthly_limit_count: 0,
   floating_days: true,
+  floating_days_variance: 2,
   randomize_posting_times: true,
   max_floating_minutes: 45,
   no_link_pins: false,
@@ -221,6 +223,7 @@ export default function WorkflowSettingsPanel() {
           monthly_limit_enabled: Boolean(content.monthly_limit_enabled ?? DEFAULT_FORM.monthly_limit_enabled),
           monthly_limit_count: toNumber(content.monthly_limit_count, DEFAULT_FORM.monthly_limit_count),
           floating_days: Boolean(generation.floating_days ?? scheduleSettings?.floating_days ?? DEFAULT_FORM.floating_days),
+          floating_days_variance: toNumber(generation.floating_days_variance, DEFAULT_FORM.floating_days_variance),
           randomize_posting_times: Boolean(generation.randomize_posting_times ?? scheduleSettings?.random_minutes ?? DEFAULT_FORM.randomize_posting_times),
           max_floating_minutes: toNumber(generation.max_floating_minutes, scheduleSettings?.max_floating_minutes ?? DEFAULT_FORM.max_floating_minutes),
           no_link_pins: Boolean(content.no_link_pins ?? DEFAULT_FORM.no_link_pins),
@@ -260,6 +263,7 @@ export default function WorkflowSettingsPanel() {
               month,
               daily_pin_count: form.daily_pin_count,
               floating_days: form.floating_days,
+              floating_days_variance: form.floating_days_variance,
               warmup_month: false,
             })
             : Promise.resolve(null),
@@ -299,6 +303,7 @@ export default function WorkflowSettingsPanel() {
     showWindowPreview,
     form.daily_pin_count,
     form.floating_days,
+    form.floating_days_variance,
     form.floating_start_end_hours,
     form.start_hour,
     form.end_hour,
@@ -370,6 +375,7 @@ export default function WorkflowSettingsPanel() {
           start_hour: clamp(form.start_hour, 0, 23),
           end_hour: clamp(form.end_hour, 0, 23),
           floating_days: form.floating_days,
+          floating_days_variance: clamp(form.floating_days_variance, 0, 10),
           randomize_posting_times: form.randomize_posting_times,
           max_floating_minutes: clamp(form.max_floating_minutes, 0, 240),
           floating_start_end_hours: form.floating_start_end_hours,
@@ -597,9 +603,22 @@ export default function WorkflowSettingsPanel() {
             checked={form.floating_days}
             onChange={(event) => setForm((prev) => ({ ...prev, floating_days: event.target.checked }))}
           />
-          Use floating days (randomize daily pin count ±2)
+          Use floating days (randomize daily pin count)
         </label>
-        <p className="text-sm text-gray-500">Number of daily pins will vary by ±2 to create natural posting patterns.</p>
+        {form.floating_days && (
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            <span className="text-xs font-semibold uppercase text-gray-500">Variance (± pins per day)</span>
+            <input
+              type="number"
+              min={0}
+              max={10}
+              value={form.floating_days_variance}
+              onChange={(event) => setForm((prev) => ({ ...prev, floating_days_variance: clamp(Number(event.target.value) || 0, 0, 10) }))}
+              className="h-9 w-20 px-2 rounded-md border border-gray-300 bg-white"
+            />
+          </label>
+        )}
+        <p className="text-sm text-gray-500">Number of daily pins will vary by ±{form.floating_days_variance} to create natural posting patterns.</p>
         <label className="flex items-center gap-2 text-sm text-gray-500">
           <input
             type="checkbox"

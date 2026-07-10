@@ -55,6 +55,13 @@ def _normalize_align(value: Any, fallback: str = "center") -> str:
     return fallback
 
 
+def _normalize_text_effect(value: Any) -> str:
+    raw = str(value or "none").strip().lower()
+    if raw in {"none", "drop", "echo", "outline"}:
+        return raw
+    return "none"
+
+
 def _normalize_source_type(value: Any) -> str:
     raw = str(value or "").strip().lower()
     if raw in {"svg_text", "ocr_image", "vector_path_cluster", "svg_image"}:
@@ -76,6 +83,7 @@ class CandidateRegion:
     bounds: dict[str, int]
     text_hint: str
     confidence: float
+    text_color: str | None = None
 
 
 def extract_canvas_size(root: ET.Element) -> tuple[int, int]:
@@ -270,6 +278,7 @@ def parse_svg_structure(svg_content: str) -> dict[str, Any]:
                     },
                     text_hint=text,
                     confidence=0.98,
+                    text_color=_hex(elem.get("fill"), None),
                 )
             )
             continue
@@ -375,6 +384,7 @@ def parse_svg_structure(svg_content: str) -> dict[str, Any]:
                 "bounds": c.bounds,
                 "text_hint": c.text_hint,
                 "confidence": c.confidence,
+                "text_color": c.text_color,
             }
             for c in all_text_like
         ],
@@ -570,6 +580,7 @@ def build_manifest_v2(
         prev_replacement = prev.get("replacement") if isinstance(prev, dict) else {}
         style = {
             **_default_style_for_zone("main_text", bounds),
+            "fill": _hex(candidate.get("text_color"), "#111111"),
             **(prev_style if isinstance(prev_style, dict) else {}),
         }
         replacement_text = str((prev_replacement or {}).get("text") or text)
@@ -614,6 +625,7 @@ def build_manifest_v2(
         prev_replacement = prev.get("replacement") if isinstance(prev, dict) else {}
         style = {
             **_default_style_for_zone("secondary_text", bounds),
+            "fill": _hex(candidate.get("text_color"), "#111111"),
             **(prev_style if isinstance(prev_style, dict) else {}),
         }
         replacement_text = str((prev_replacement or {}).get("text") or text)
@@ -736,6 +748,15 @@ def normalize_manifest_v2(manifest: dict[str, Any]) -> dict[str, Any]:
                 "fill": _hex(style_raw.get("fill"), "#111111"),
                 "align": _normalize_align(style_raw.get("align"), "center"),
                 "font_file": str(style_raw.get("font_file") or "").strip() or None,
+                "line_height": _float(style_raw.get("line_height"), 1.0),
+                "letter_spacing": _int(style_raw.get("letter_spacing"), 0),
+                "uppercase": bool(style_raw.get("uppercase", False)),
+                "max_lines": _int(style_raw.get("max_lines"), 3, minimum=1),
+                "text_effect": _normalize_text_effect(style_raw.get("text_effect")),
+                "text_effect_color": _hex(style_raw.get("text_effect_color"), "#000000"),
+                "text_effect_offset_x": _int(style_raw.get("text_effect_offset_x"), 2),
+                "text_effect_offset_y": _int(style_raw.get("text_effect_offset_y"), 2),
+                "text_effect_blur": _int(style_raw.get("text_effect_blur"), 0),
             }
             zone["replacement"] = {
                 "text": str(replacement_raw.get("text") if replacement_raw.get("text") is not None else zone["text"]),
@@ -985,13 +1006,15 @@ def project_manifest_v2_to_legacy_zones(manifest: dict[str, Any]) -> dict[str, A
                 "font_weight": str(style.get("font_weight") or "700"),
                 "font_size": _int(style.get("font_size"), 24, minimum=8),
                 "text_color": _hex(style.get("fill"), "#111111"),
-                "text_effect": "none",
-                "text_effect_color": "#000000",
-                "text_effect_offset_x": 2,
-                "text_effect_offset_y": 2,
-                "text_effect_blur": 0,
-                "max_lines": 2,
-                "uppercase": False,
+                "letter_spacing": _int(style.get("letter_spacing"), 0),
+                "line_height_multiplier": _float(style.get("line_height"), 1.0),
+                "text_effect": _normalize_text_effect(style.get("text_effect")),
+                "text_effect_color": _hex(style.get("text_effect_color"), "#000000"),
+                "text_effect_offset_x": _int(style.get("text_effect_offset_x"), 2),
+                "text_effect_offset_y": _int(style.get("text_effect_offset_y"), 2),
+                "text_effect_blur": _int(style.get("text_effect_blur"), 0),
+                "max_lines": _int(style.get("max_lines"), 2, minimum=1),
+                "uppercase": bool(style.get("uppercase", False)),
                 "default_text": str(zone.get("text") or ""),
                 "custom_font_file": str(replacement.get("font_file") or style.get("font_file") or "").strip() or None,
             }
@@ -1009,11 +1032,15 @@ def project_manifest_v2_to_legacy_zones(manifest: dict[str, Any]) -> dict[str, A
             "text_color": _hex(main_style.get("fill"), "#111111"),
             "text_align": _normalize_align(main_style.get("align"), "center"),
             "font_family": str(main_style.get("font_family") or '"Poppins", "Segoe UI", Arial, sans-serif'),
-            "text_effect": "none",
-            "text_effect_color": "#000000",
-            "text_effect_offset_x": 2,
-            "text_effect_offset_y": 2,
-            "text_effect_blur": 0,
+            "letter_spacing": _int(main_style.get("letter_spacing"), 0),
+            "uppercase": bool(main_style.get("uppercase", False)),
+            "max_lines": _int(main_style.get("max_lines"), 3, minimum=1),
+            "line_height_multiplier": _float(main_style.get("line_height"), 1.0),
+            "text_effect": _normalize_text_effect(main_style.get("text_effect")),
+            "text_effect_color": _hex(main_style.get("text_effect_color"), "#000000"),
+            "text_effect_offset_x": _int(main_style.get("text_effect_offset_x"), 2),
+            "text_effect_offset_y": _int(main_style.get("text_effect_offset_y"), 2),
+            "text_effect_blur": _int(main_style.get("text_effect_blur"), 0),
             "text_zone_bg_color": "#ffffff",
             "custom_font_file": main_font_file,
             "secondary_text_slots": secondary_slots,

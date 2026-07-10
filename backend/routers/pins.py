@@ -564,6 +564,7 @@ def _generate_pin_drafts(
         pin_title = pin_titles[0] if pin_titles else sanitize_generated_text(page.title or "")
         pin_to_keep = existing_pins[0] if existing_pins else None
         page_render_settings = resolve_page_render_settings(page, render_settings, primary_image.url)
+        page_render_settings.update(_playground_text_overrides(site_settings))
 
         if pin_to_keep:
             if pin_to_keep.media_url:
@@ -773,6 +774,8 @@ def _run_generation_job(job_id: int) -> None:
                 settings = merge_pin_settings(pin, request.render_settings)
                 settings = fill_missing_settings_from_template(pin, db, settings)
                 settings = resolve_page_render_settings(pin.page, settings, pin.selected_image_url)
+                website_settings = db.query(Website.generation_settings).filter(Website.id == pin.page.website_id).first()
+                settings.update(_playground_text_overrides(website_settings if isinstance(website_settings, dict) else None))
                 url = loop.run_until_complete(generate_pin_media_url(pin, db, settings))
                 pin.status = "ready" if url else "draft"
                 db.commit()
@@ -876,6 +879,36 @@ def _load_template_svg_defaults(template: Template) -> dict:
     except (TypeError, ValueError):
         pass
     return defaults
+
+
+def _playground_text_overrides(site_settings: dict | None) -> dict:
+    """Text-styling overrides from a website's saved Playground settings.
+
+    Precedence: request > playground > template defaults. Playground is the user's
+    per-website preview styling (font color, scale, padding, line height, letter
+    spacing, uppercase, max lines, text effect). When present it overrides the
+    template-derived defaults so the exported pins match what the user styled.
+    """
+    if not isinstance(site_settings, dict):
+        return {}
+    playground = site_settings.get("playground")
+    if not isinstance(playground, dict):
+        return {}
+    overrides: dict = {}
+    if playground.get("font_color"):
+        overrides["text_color"] = str(playground["font_color"])
+    for key in ("title_scale", "title_padding_x", "line_height_multiplier", "letter_spacing", "max_lines"):
+        value = playground.get(key)
+        if value is not None:
+            overrides[key] = value
+    if playground.get("uppercase") is not None:
+        overrides["uppercase"] = bool(playground["uppercase"])
+    effect = playground.get("text_effect")
+    if effect in {"none", "drop", "echo", "outline"}:
+        overrides["text_effect"] = effect
+    if playground.get("text_effect_color"):
+        overrides["text_effect_color"] = str(playground["text_effect_color"])
+    return overrides
 
 
 def build_render_settings(template: Template, request_settings: Optional[PinRenderSettings]) -> dict:

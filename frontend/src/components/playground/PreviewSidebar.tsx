@@ -22,6 +22,16 @@ type PreviewSidebarProps = {
   titleScale: number;
   titlePaddingX: number;
   lineHeightMultiplier: number;
+  letterSpacing?: number;
+  onLetterSpacingChange?: (value: number) => void;
+  uppercase?: boolean;
+  onUppercaseChange?: (value: boolean) => void;
+  maxLines?: number;
+  onMaxLinesChange?: (value: number) => void;
+  textEffect?: 'none' | 'drop' | 'echo' | 'outline';
+  onTextEffectChange?: (value: 'none' | 'drop' | 'echo' | 'outline') => void;
+  textEffectColor?: string;
+  onTextEffectColorChange?: (value: string) => void;
   onResetTextSettings?: () => void;
   previewImages?: string[];
   previewTitle?: string;
@@ -98,6 +108,16 @@ export default function PreviewSidebar({
   titleScale,
   titlePaddingX,
   lineHeightMultiplier,
+  letterSpacing = 0,
+  onLetterSpacingChange,
+  uppercase = true,
+  onUppercaseChange,
+  maxLines = 3,
+  onMaxLinesChange,
+  textEffect = 'none',
+  onTextEffectChange,
+  textEffectColor = '#000000',
+  onTextEffectColorChange,
   onResetTextSettings,
   previewImages = [],
   previewTitle = 'Sample Pin Title',
@@ -231,7 +251,7 @@ export default function PreviewSidebar({
         </div>
       </div>
 
-      <div className="space-y-1.5 rounded-md border border-slate-200 bg-slate-50 p-2">
+      <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-2">
         <div className="flex items-center justify-between gap-2">
           <div className="text-xs font-semibold text-slate-700">Title Controls</div>
           {onResetTextSettings && (
@@ -244,10 +264,83 @@ export default function PreviewSidebar({
             </button>
           )}
         </div>
-        <div className="text-[11px] text-slate-600">Drag the labels on the canvas: Size / Padding / Spacing.</div>
+        <div className="text-[11px] text-slate-600">Drag labels on canvas: Size / Padding / Spacing.</div>
         <div className="text-[10px] text-slate-500">
           {Math.round(titleScale * 100)}% · {Math.round(titlePaddingX)}px · {lineHeightMultiplier.toFixed(2)}x
         </div>
+
+        {onLetterSpacingChange && (
+        <>
+        <div className="grid grid-cols-2 gap-2 pt-1">
+          <label className="space-y-1">
+            <span className="block text-[10px] font-semibold uppercase text-slate-500">Letter spacing</span>
+            <Input
+              type="number"
+              step={0.5}
+              min={-20}
+              max={40}
+              value={letterSpacing}
+              onChange={(event) => onLetterSpacingChange?.(Number(event.target.value))}
+              className="h-9"
+            />
+          </label>
+          <label className="space-y-1">
+            <span className="block text-[10px] font-semibold uppercase text-slate-500">Max lines</span>
+            <Input
+              type="number"
+              min={1}
+              max={8}
+              value={maxLines}
+              onChange={(event) => onMaxLinesChange?.(Math.max(1, Math.min(8, Number(event.target.value) || 1)))}
+              className="h-9"
+            />
+          </label>
+        </div>
+
+        <label className="space-y-1">
+          <span className="block text-[10px] font-semibold uppercase text-slate-500">Text effect</span>
+          <select
+            value={textEffect}
+            onChange={(event) => onTextEffectChange?.(event.target.value as 'none' | 'drop' | 'echo' | 'outline')}
+            className="h-9 w-full rounded-md border border-slate-300 bg-white px-2 text-sm"
+          >
+            <option value="none">None</option>
+            <option value="drop">Drop shadow</option>
+            <option value="echo">Echo</option>
+            <option value="outline">Outline</option>
+          </select>
+        </label>
+
+        <div className="grid grid-cols-[1fr_auto] items-end gap-2">
+          <label className="space-y-1">
+            <span className="block text-[10px] font-semibold uppercase text-slate-500">Effect color</span>
+            <Input
+              value={textEffectColor}
+              onChange={(event) => onTextEffectColorChange?.(event.target.value)}
+              className="h-9"
+              placeholder="#000000"
+            />
+          </label>
+          <input
+            type="color"
+            value={/^#[0-9a-f]{6}$/i.test(textEffectColor) ? textEffectColor : '#000000'}
+            onChange={(event) => onTextEffectColorChange?.(event.target.value)}
+            className="h-9 w-10 rounded-md border border-slate-300 bg-white"
+            aria-label="Pick effect color"
+          />
+        </div>
+
+        <label className="flex items-center gap-2 text-[11px] font-semibold text-slate-700">
+          <input
+            type="checkbox"
+            checked={uppercase}
+            onChange={(event) => onUppercaseChange?.(event.target.checked)}
+            className="h-4 w-4"
+          />
+          Uppercase title
+        </label>
+        </>
+        )}
       </div>
     </div>
   );

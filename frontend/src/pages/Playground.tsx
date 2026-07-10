@@ -15,9 +15,12 @@ import type { PlaygroundState } from '../components/playground/types';
 import {
   DEFAULT_PLAYGROUND_TEXT_SETTINGS,
   clampLineHeightMultiplier,
+  clampLetterSpacing,
+  clampMaxLines,
   clampTitlePaddingX,
   clampTitleScale,
   normalizeFontSets,
+  normalizeTextEffect,
 } from '../utils/playgroundSettings';
 
 const DEFAULT_STATE: PlaygroundState = {
@@ -87,6 +90,11 @@ export default function Playground() {
   const [titleScale, setTitleScale] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titleScale);
   const [titlePaddingX, setTitlePaddingX] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titlePaddingX);
   const [lineHeightMultiplier, setLineHeightMultiplier] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.lineHeightMultiplier);
+  const [letterSpacing, setLetterSpacing] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.letterSpacing);
+  const [uppercase, setUppercase] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase);
+  const [maxLines, setMaxLines] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.maxLines);
+  const [textEffect, setTextEffect] = useState<'none' | 'drop' | 'echo' | 'outline'>(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffect);
+  const [textEffectColor, setTextEffectColor] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor);
   const initialStateRef = useRef<PlaygroundState | null>(null);
   const initialTitleScaleRef = useRef<number>(1);
   const initialTitlePaddingRef = useRef<number>(15);
@@ -222,6 +230,15 @@ export default function Playground() {
         setTitlePaddingX(safePadding);
         const safeLineHeight = clampLineHeightMultiplier((settings as any).line_height_multiplier);
         setLineHeightMultiplier(safeLineHeight);
+        const safeLetterSpacing = clampLetterSpacing((settings as any).letter_spacing);
+        setLetterSpacing(safeLetterSpacing);
+        setUppercase(Boolean((settings as any).uppercase ?? DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase));
+        const safeMaxLines = clampMaxLines((settings as any).max_lines);
+        setMaxLines(safeMaxLines);
+        const safeTextEffect = normalizeTextEffect((settings as any).text_effect);
+        setTextEffect(safeTextEffect);
+        const safeEffectColor = String((settings as any).text_effect_color || DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor);
+        setTextEffectColor(safeEffectColor);
         initialTitleScaleRef.current = safeScale;
         initialTitlePaddingRef.current = safePadding;
         initialLineHeightRef.current = safeLineHeight;
@@ -308,6 +325,11 @@ export default function Playground() {
         title_scale: titleScale,
         title_padding_x: titlePaddingX,
         line_height_multiplier: lineHeightMultiplier,
+        letter_spacing: letterSpacing,
+        uppercase,
+        max_lines: maxLines,
+        text_effect: textEffect,
+        text_effect_color: textEffectColor,
         image_settings: state.imageSettings as unknown as Record<string, unknown>,
         display_settings: state.displaySettings as unknown as Record<string, unknown>,
         advanced_settings: state.advancedSettings as unknown as Record<string, unknown>,
@@ -476,6 +498,11 @@ export default function Playground() {
     setTitleScale(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titleScale);
     setTitlePaddingX(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titlePaddingX);
     setLineHeightMultiplier(DEFAULT_PLAYGROUND_TEXT_SETTINGS.lineHeightMultiplier);
+    setLetterSpacing(DEFAULT_PLAYGROUND_TEXT_SETTINGS.letterSpacing);
+    setUppercase(DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase);
+    setMaxLines(DEFAULT_PLAYGROUND_TEXT_SETTINGS.maxLines);
+    setTextEffect(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffect);
+    setTextEffectColor(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor);
     setState((prev) => ({
       ...prev,
       activeFontColor: DEFAULT_PLAYGROUND_TEXT_SETTINGS.fontColor,
@@ -608,6 +635,11 @@ export default function Playground() {
                     titleScale={titleScale}
                     titlePaddingX={titlePaddingX}
                     lineHeightMultiplier={lineHeightMultiplier}
+                    letterSpacing={letterSpacing}
+                    uppercase={uppercase}
+                    maxLines={maxLines}
+                    textEffect={textEffect}
+                    textEffectColor={textEffectColor}
                     imageSettings={state.imageSettings}
                     zoom={0.8}
                     className="w-full"
@@ -648,6 +680,16 @@ export default function Playground() {
         onTitlePaddingXChange={setTitlePaddingX}
         lineHeightMultiplier={lineHeightMultiplier}
         onLineHeightMultiplierChange={setLineHeightMultiplier}
+        letterSpacing={letterSpacing}
+        onLetterSpacingChange={setLetterSpacing}
+        uppercase={uppercase}
+        onUppercaseChange={setUppercase}
+        maxLines={maxLines}
+        onMaxLinesChange={setMaxLines}
+        textEffect={textEffect}
+        onTextEffectChange={setTextEffect}
+        textEffectColor={textEffectColor}
+        onTextEffectColorChange={setTextEffectColor}
         onResetTextSettings={resetTextSettings}
         metadata={previewMeta}
         loading={previewLoading}

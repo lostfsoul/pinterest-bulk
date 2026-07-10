@@ -103,6 +103,7 @@ def workflow_pin_count_preview(
     month: int = Query(..., ge=1, le=12),
     daily_pin_count: int | None = Query(default=None, ge=1, le=100),
     floating_days: bool | None = Query(default=None),
+    floating_days_variance: int | None = Query(default=None, ge=0, le=10),
     warmup_month: bool | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
@@ -114,6 +115,8 @@ def workflow_pin_count_preview(
         config["pins_per_day"] = daily_pin_count
     if floating_days is not None:
         config["floating_days"] = floating_days
+    if floating_days_variance is not None:
+        config["floating_days_variance"] = floating_days_variance
     if warmup_month is not None:
         config["warmup_month"] = warmup_month
     days = get_pin_count_preview(website=website, config=config, year=year, month=month)

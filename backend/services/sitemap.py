@@ -158,19 +158,29 @@ def _extract_links_from_html(html: str, base_url: str) -> set[str]:
 
 
 async def fetch_sitemap(sitemap_url: str) -> str | None:
-    """Fetch sitemap XML content."""
+    """Fetch sitemap XML content, retrying transient failures.
+
+    ponytail: 2 attempts per candidate with 1s backoff — fixes silent single-shot
+    skips (e.g. post-sitemap6 timing out on first hit).
+    """
+    import asyncio
+
     candidates = build_sitemap_fetch_candidates(sitemap_url) or [sitemap_url]
-    try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            for candidate in candidates:
+    last_error: Exception | None = None
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for candidate in candidates:
+            for attempt in range(2):
                 try:
                     response = await client.get(candidate)
                     response.raise_for_status()
                     return response.text
                 except Exception as candidate_error:
-                    print(f"Error fetching sitemap candidate {candidate}: {candidate_error}")
-    except Exception as e:
-        print(f"Error fetching sitemap: {e}")
+                    last_error = candidate_error
+                    print(f"Error fetching sitemap candidate {candidate} (attempt {attempt + 1}): {candidate_error}")
+                    if attempt == 0:
+                        await asyncio.sleep(1.0)
+    if last_error is not None:
+        print(f"Error fetching sitemap {sitemap_url}: {last_error}")
     return None
 
 

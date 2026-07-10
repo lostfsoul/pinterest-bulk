@@ -5,6 +5,11 @@ export const DEFAULT_PLAYGROUND_TEXT_SETTINGS = {
   titleScale: 1,
   titlePaddingX: 15,
   lineHeightMultiplier: 1,
+  letterSpacing: 0,
+  uppercase: true,
+  maxLines: 3,
+  textEffect: 'none' as 'none' | 'drop' | 'echo' | 'outline',
+  textEffectColor: '#000000',
 };
 
 export function clampTitleScale(value: unknown): number {
@@ -20,6 +25,21 @@ export function clampTitlePaddingX(value: unknown): number {
 export function clampLineHeightMultiplier(value: unknown): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0.8, Math.min(1.35, parsed)) : DEFAULT_PLAYGROUND_TEXT_SETTINGS.lineHeightMultiplier;
+}
+
+export function clampLetterSpacing(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(-20, Math.min(40, parsed)) : DEFAULT_PLAYGROUND_TEXT_SETTINGS.letterSpacing;
+}
+
+export function clampMaxLines(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(8, Math.round(parsed))) : DEFAULT_PLAYGROUND_TEXT_SETTINGS.maxLines;
+}
+
+export function normalizeTextEffect(value: unknown): 'none' | 'drop' | 'echo' | 'outline' {
+  const raw = String(value || 'none').toLowerCase();
+  return raw === 'drop' || raw === 'echo' || raw === 'outline' ? raw : 'none';
 }
 
 export function normalizeFontSets(fonts: PlaygroundFontSet[]): PlaygroundFontSet[] {

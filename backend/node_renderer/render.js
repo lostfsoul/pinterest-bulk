@@ -285,9 +285,11 @@ function fitTitleNoOverflow(ctx, text, options) {
         effectMarginY = 0,
         uppercase = true,
         lineHeightMultiplier = 1.0,
+        letterSpacing = 0,
     } = options || {};
 
     const family = normalizeFontFamily(fontFamily);
+    try { ctx.letterSpacing = `${Number(letterSpacing || 0)}px`; } catch { /* node-canvas < 2.10 */ }
     const source = uppercase ? safeUpperCase(text) : String(text || '').trim();
     const words = source.split(/\s+/).filter(Boolean);
     const usableW = Math.max(20, Number(zoneW || 0) - (2 * Math.abs(padX)) - (2 * Math.abs(effectMarginX)));
@@ -467,6 +469,7 @@ function drawFittedTextBlock(ctx, text, rect, style) {
         uppercase: Boolean(style.uppercase),
         preferredFontSize: Number(style.preferredFontSize || 0),
         lineHeightMultiplier,
+        letterSpacing: Number(style.letterSpacing || 0),
     };
     const fitted = style.forceTitleFit
         ? fitTitleNoOverflow(ctx, text, fitOptions)
@@ -481,6 +484,7 @@ function drawFittedTextBlock(ctx, text, rect, style) {
     ctx.font = `${scaledFitted.weight} ${scaledFitted.fontSize}px ${scaledFitted.family}`.trim();
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = align;
+    try { ctx.letterSpacing = `${Number(style.letterSpacing || 0)}px`; } catch { /* node-canvas < 2.10 */ }
 
     const lineH = scaledFitted.fontSize * Math.max(0.8, Math.min(1.4, lineHeightMultiplier));
     const m = ctx.measureText('A');

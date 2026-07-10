@@ -355,6 +355,7 @@ def resolve_website_schedule_config(db: Session, website: Website) -> dict[str, 
         "end_hour": end_hour,
         "warmup_month": bool(generation.get("warmup_month", False)),
         "floating_days": bool(generation.get("floating_days", default_floating_days)),
+        "floating_days_variance": _clamp_int(generation.get("floating_days_variance"), 2, 0, 10),
         "randomize_posting_times": bool(generation.get("randomize_posting_times", default_random_minutes)),
         "max_floating_minutes": _clamp_int(generation.get("max_floating_minutes"), default_max_floating_minutes, 0, 240),
         "floating_start_end_hours": bool(
@@ -387,7 +388,8 @@ def resolve_daily_pin_count(
 
     if bool(config.get("floating_days", True)):
         rng = _deterministic_rng(website_id, year, month, day, "floating-days")
-        base_count = max(1, base_count + rng.randint(-2, 2))
+        variance = _clamp_int(config.get("floating_days_variance"), 2, 0, 10)
+        base_count = max(1, base_count + rng.randint(-variance, variance))
 
     return base_count
 

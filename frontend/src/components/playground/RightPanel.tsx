@@ -26,6 +26,16 @@ type RightPanelProps = {
   onTitlePaddingXChange: (value: number) => void;
   lineHeightMultiplier: number;
   onLineHeightMultiplierChange: (value: number) => void;
+  letterSpacing: number;
+  onLetterSpacingChange: (value: number) => void;
+  uppercase: boolean;
+  onUppercaseChange: (value: boolean) => void;
+  maxLines: number;
+  onMaxLinesChange: (value: number) => void;
+  textEffect: 'none' | 'drop' | 'echo' | 'outline';
+  onTextEffectChange: (value: 'none' | 'drop' | 'echo' | 'outline') => void;
+  textEffectColor: string;
+  onTextEffectColorChange: (value: string) => void;
   onResetTextSettings: () => void;
   metadata: PlaygroundPreviewMeta | null;
   loading: boolean;
@@ -71,6 +81,16 @@ export default function RightPanel({
   onTitlePaddingXChange,
   lineHeightMultiplier,
   onLineHeightMultiplierChange,
+  letterSpacing,
+  onLetterSpacingChange,
+  uppercase,
+  onUppercaseChange,
+  maxLines,
+  onMaxLinesChange,
+  textEffect,
+  onTextEffectChange,
+  textEffectColor,
+  onTextEffectColorChange,
   onResetTextSettings,
   metadata,
   loading,
@@ -158,6 +178,11 @@ export default function RightPanel({
                       titleScale={titleScale}
                       titlePaddingX={titlePaddingX}
                       lineHeightMultiplier={lineHeightMultiplier}
+                      letterSpacing={letterSpacing}
+                      uppercase={uppercase}
+                      maxLines={maxLines}
+                      textEffect={textEffect}
+                      textEffectColor={textEffectColor}
                       onTitleScaleChange={onTitleScaleChange}
                       onTitlePaddingXChange={onTitlePaddingXChange}
                       onLineHeightMultiplierChange={onLineHeightMultiplierChange}
@@ -194,6 +219,16 @@ export default function RightPanel({
                 titleScale={titleScale}
                 titlePaddingX={titlePaddingX}
                 lineHeightMultiplier={lineHeightMultiplier}
+                letterSpacing={letterSpacing}
+                onLetterSpacingChange={onLetterSpacingChange}
+                uppercase={uppercase}
+                onUppercaseChange={onUppercaseChange}
+                maxLines={maxLines}
+                onMaxLinesChange={onMaxLinesChange}
+                textEffect={textEffect}
+                onTextEffectChange={onTextEffectChange}
+                textEffectColor={textEffectColor}
+                onTextEffectColorChange={onTextEffectColorChange}
                 onResetTextSettings={onResetTextSettings}
                 previewImages={rendererImages}
                 previewTitle={previewTitle}

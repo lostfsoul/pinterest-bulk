@@ -583,6 +583,11 @@ def _default_playground_settings() -> dict[str, Any]:
         "title_scale": 1.0,
         "title_padding_x": 15,
         "line_height_multiplier": 1.0,
+        "letter_spacing": 0,
+        "uppercase": True,
+        "max_lines": 3,
+        "text_effect": "none",
+        "text_effect_color": "#000000",
         "ai_settings": {
             "promptStyle": "informative",
             "customPrompt": "",
@@ -758,6 +763,18 @@ def save_settings(db: Session, website_id: int, payload: dict[str, Any]) -> dict
         merged_payload["line_height_multiplier"] = max(0.8, min(1.35, float(merged_payload.get("line_height_multiplier", 1.0))))
     except (TypeError, ValueError):
         merged_payload["line_height_multiplier"] = 1.0
+    try:
+        merged_payload["letter_spacing"] = max(-20, min(40, int(float(merged_payload.get("letter_spacing", 0)))))
+    except (TypeError, ValueError):
+        merged_payload["letter_spacing"] = 0
+    merged_payload["uppercase"] = bool(merged_payload.get("uppercase", True))
+    try:
+        merged_payload["max_lines"] = max(1, min(8, int(float(merged_payload.get("max_lines", 3)))))
+    except (TypeError, ValueError):
+        merged_payload["max_lines"] = 3
+    effect = str(merged_payload.get("text_effect", "none") or "none").lower()
+    merged_payload["text_effect"] = effect if effect in {"none", "drop", "echo", "outline"} else "none"
+    merged_payload["text_effect_color"] = str(merged_payload.get("text_effect_color", "#000000") or "#000000")
     for key in ("ai_settings", "image_settings", "display_settings", "advanced_settings"):
         base = merged_payload.get(key)
         incoming = payload.get(key)

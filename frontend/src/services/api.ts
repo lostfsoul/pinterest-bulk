@@ -409,6 +409,11 @@ export interface PlaygroundSettings {
   title_scale?: number;
   title_padding_x?: number;
   line_height_multiplier?: number;
+  letter_spacing?: number;
+  uppercase?: boolean;
+  max_lines?: number;
+  text_effect?: 'none' | 'drop' | 'echo' | 'outline';
+  text_effect_color?: string;
   ai_settings?: Record<string, unknown>;
   image_settings?: Record<string, unknown>;
   display_settings?: Record<string, unknown>;
@@ -775,6 +780,7 @@ export const apiClient = {
     month: number;
     daily_pin_count?: number;
     floating_days?: boolean;
+    floating_days_variance?: number;
     warmup_month?: boolean;
   }) =>
     api.get<WorkflowPinCountPreviewResponse>('/workflow/pin-count-preview', { params }),

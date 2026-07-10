@@ -31,9 +31,12 @@ import {
 import {
   DEFAULT_PLAYGROUND_TEXT_SETTINGS,
   clampLineHeightMultiplier,
+  clampLetterSpacing,
+  clampMaxLines,
   clampTitlePaddingX,
   clampTitleScale,
   normalizeFontSets,
+  normalizeTextEffect,
 } from '../utils/playgroundSettings';
 
 type OnboardingModalProps = {
@@ -176,6 +179,11 @@ export default function OnboardingModal({
   const [titleScale, setTitleScale] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titleScale);
   const [titlePaddingX, setTitlePaddingX] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titlePaddingX);
   const [lineHeightMultiplier, setLineHeightMultiplier] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.lineHeightMultiplier);
+  const [letterSpacing, setLetterSpacing] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.letterSpacing);
+  const [uppercase, setUppercase] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase);
+  const [maxLines, setMaxLines] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.maxLines);
+  const [textEffect, setTextEffect] = useState<'none' | 'drop' | 'echo' | 'outline'>(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffect);
+  const [textEffectColor, setTextEffectColor] = useState(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor);
   const [workflow, setWorkflow] = useState<WorkflowDraft>(DEFAULT_WORKFLOW);
   const [pages, setPages] = useState<Page[]>([]);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<number>>(new Set());
@@ -330,6 +338,11 @@ export default function OnboardingModal({
         setTitleScale(clampTitleScale(playgroundSettings?.title_scale));
         setTitlePaddingX(clampTitlePaddingX(playgroundSettings?.title_padding_x));
         setLineHeightMultiplier(clampLineHeightMultiplier(playgroundSettings?.line_height_multiplier));
+        setLetterSpacing(clampLetterSpacing(playgroundSettings?.letter_spacing));
+        setUppercase(playgroundSettings?.uppercase === false ? false : DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase);
+        setMaxLines(clampMaxLines(playgroundSettings?.max_lines));
+        setTextEffect(normalizeTextEffect(playgroundSettings?.text_effect));
+        setTextEffectColor(String(playgroundSettings?.text_effect_color || DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor));
         setWorkflow({
           daily_pin_count: clamp(Number(generation.daily_pin_count || DEFAULT_WORKFLOW.daily_pin_count), 1, 100),
           scheduling_window_days: clamp(Number(generation.scheduling_window_days || DEFAULT_WORKFLOW.scheduling_window_days), 2, 60),
@@ -608,6 +621,11 @@ export default function OnboardingModal({
       title_scale: titleScale,
       title_padding_x: titlePaddingX,
       line_height_multiplier: lineHeightMultiplier,
+      letter_spacing: letterSpacing,
+      uppercase,
+      max_lines: maxLines,
+      text_effect: textEffect,
+      text_effect_color: textEffectColor,
       ai_settings: current?.ai_settings || {},
       image_settings: current?.image_settings || {},
       display_settings: current?.display_settings || {},
@@ -806,6 +824,11 @@ export default function OnboardingModal({
     setTitleScale(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titleScale);
     setTitlePaddingX(DEFAULT_PLAYGROUND_TEXT_SETTINGS.titlePaddingX);
     setLineHeightMultiplier(DEFAULT_PLAYGROUND_TEXT_SETTINGS.lineHeightMultiplier);
+    setLetterSpacing(DEFAULT_PLAYGROUND_TEXT_SETTINGS.letterSpacing);
+    setUppercase(DEFAULT_PLAYGROUND_TEXT_SETTINGS.uppercase);
+    setMaxLines(DEFAULT_PLAYGROUND_TEXT_SETTINGS.maxLines);
+    setTextEffect(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffect);
+    setTextEffectColor(DEFAULT_PLAYGROUND_TEXT_SETTINGS.textEffectColor);
     setActiveFontColor(DEFAULT_PLAYGROUND_TEXT_SETTINGS.fontColor);
   }
 
@@ -1032,6 +1055,11 @@ export default function OnboardingModal({
                             titleScale={titleScale}
                             titlePaddingX={titlePaddingX}
                             lineHeightMultiplier={lineHeightMultiplier}
+                            letterSpacing={letterSpacing}
+                            uppercase={uppercase}
+                            maxLines={maxLines}
+                            textEffect={textEffect}
+                            textEffectColor={textEffectColor}
                             onTitleScaleChange={setTitleScale}
                             onTitlePaddingXChange={setTitlePaddingX}
                             onLineHeightMultiplierChange={setLineHeightMultiplier}
@@ -1138,6 +1166,16 @@ export default function OnboardingModal({
                         titleScale={titleScale}
                         titlePaddingX={titlePaddingX}
                         lineHeightMultiplier={lineHeightMultiplier}
+                        letterSpacing={letterSpacing}
+                        onLetterSpacingChange={setLetterSpacing}
+                        uppercase={uppercase}
+                        onUppercaseChange={setUppercase}
+                        maxLines={maxLines}
+                        onMaxLinesChange={setMaxLines}
+                        textEffect={textEffect}
+                        onTextEffectChange={setTextEffect}
+                        textEffectColor={textEffectColor}
+                        onTextEffectColorChange={setTextEffectColor}
                         onResetTextSettings={resetTextSettings}
                         previewImages={previewImages}
                         previewTitle={previewPage?.title || 'Your First Pinterest Pin'}

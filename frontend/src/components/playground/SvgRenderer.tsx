@@ -19,6 +19,11 @@ type SvgRendererProps = {
   titleScale?: number;
   titlePaddingX?: number;
   lineHeightMultiplier?: number;
+  letterSpacing?: number;
+  uppercase?: boolean;
+  maxLines?: number;
+  textEffect?: 'none' | 'drop' | 'echo' | 'outline';
+  textEffectColor?: string;
   onTitleScaleChange?: (value: number) => void;
   onTitlePaddingXChange?: (value: number) => void;
   onLineHeightMultiplierChange?: (value: number) => void;
@@ -46,6 +51,11 @@ export default function SvgRenderer({
   titleScale = 1,
   titlePaddingX = 15,
   lineHeightMultiplier = 1,
+  letterSpacing = 0,
+  uppercase = true,
+  maxLines = 3,
+  textEffect = 'none',
+  textEffectColor = '#000000',
   onTitleScaleChange,
   onTitlePaddingXChange,
   onLineHeightMultiplierChange,
@@ -59,6 +69,7 @@ export default function SvgRenderer({
   const [overlayCanvas, setOverlayCanvas] = useState<HTMLCanvasElement | null>(null);
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [textBlock, setTextBlock] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const dragStateRef = useRef<{
     key: 'scale' | 'padding' | 'lineHeight';
     startX: number;
@@ -139,6 +150,11 @@ export default function SvgRenderer({
           titleScale,
           titlePaddingX,
           lineHeightMultiplier,
+          letterSpacing,
+          uppercase,
+          maxLines,
+          textEffect,
+          textEffectColor,
           imageSettings,
         });
         if (!active || !canvasRef.current) return;
@@ -148,7 +164,8 @@ export default function SvgRenderer({
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(rendered, 0, 0);
+        ctx.drawImage(rendered.canvas, 0, 0);
+        setTextBlock(rendered.textBlock);
       } catch (drawError) {
         if (!active) return;
         setError('Failed to render preview.');
@@ -160,7 +177,7 @@ export default function SvgRenderer({
     return () => {
       active = false;
     };
-  }, [svgData, overlayCanvas, pageImages, title, fontFamily, fontSetId, fontFile, textColor, titleScale, titlePaddingX, lineHeightMultiplier, imageSettings]);
+  }, [svgData, overlayCanvas, pageImages, title, fontFamily, fontSetId, fontFile, textColor, titleScale, titlePaddingX, lineHeightMultiplier, letterSpacing, uppercase, maxLines, textEffect, textEffectColor, imageSettings]);
 
   useEffect(() => {
     return () => {
@@ -224,14 +241,21 @@ export default function SvgRenderer({
           }}
         >
           <canvas ref={canvasRef} className="block w-full h-auto" />
-          {showDragControls && svgData && (
+          {showDragControls && svgData && (() => {
+            // Bug 3: track the actual rendered text block when available so the
+            // dashed border follows the text as size/spacing change. Fall back to
+            // the static template zone before the first render completes.
+            const box = textBlock && textBlock.width > 0 && textBlock.height > 0
+              ? textBlock
+              : { x: svgData.textZoneX, y: svgData.textZoneY, width: svgData.textZoneW, height: svgData.textZoneH };
+            return (
             <div
               className="absolute border border-dashed border-sky-400/90 bg-sky-500/5"
               style={{
-                left: `${(svgData.textZoneX / svgData.canvasW) * 100}%`,
-                top: `${(svgData.textZoneY / svgData.canvasH) * 100}%`,
-                width: `${(svgData.textZoneW / svgData.canvasW) * 100}%`,
-                height: `${(svgData.textZoneH / svgData.canvasH) * 100}%`,
+                left: `${(box.x / svgData.canvasW) * 100}%`,
+                top: `${(box.y / svgData.canvasH) * 100}%`,
+                width: `${(box.width / svgData.canvasW) * 100}%`,
+                height: `${(box.height / svgData.canvasH) * 100}%`,
                 touchAction: 'none',
               }}
             >
@@ -264,7 +288,8 @@ export default function SvgRenderer({
                 aria-label="Change line spacing"
               />
             </div>
-          )}
+            );
+          })()}
         </div>
         {showDragControls && (
           <div className="pointer-events-none absolute right-2 top-2 z-10 space-y-2">

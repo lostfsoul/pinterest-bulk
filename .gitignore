@@ -30,6 +30,7 @@ frontend/dist/
 frontend/.vite/
 
 # Local storage
+bugs/
 backend/static/
 data/*.db
 data/*.db-journal

@@ -12,6 +12,19 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import Page, SEOKeyword, ImportLog, Website, WebsiteTrendKeyword
+
+
+def _decode_csv(content: bytes) -> str:
+    """Decode CSV bytes tolerantly: utf-8-sig (BOM) → utf-8 → cp1252 (Excel ANSI) → latin-1.
+
+    ponytail: latin-1 always succeeds, so this never raises — Excel exports land here.
+    """
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("latin-1", errors="replace")
 from schemas import (
     KeywordUploadResponse,
     TrendKeywordUploadResponse,
@@ -117,7 +130,7 @@ async def upload_keywords_csv(
             raise HTTPException(status_code=404, detail="Website not found")
 
     content = await file.read()
-    csv_text = content.decode("utf-8-sig")
+    csv_text = _decode_csv(content)
 
     reader = csv.DictReader(io.StringIO(csv_text))
     fieldnames = reader.fieldnames or []
@@ -232,7 +245,7 @@ async def upload_trend_keywords_csv(
         raise HTTPException(status_code=404, detail="Website not found")
 
     content = await file.read()
-    csv_text = content.decode("utf-8-sig")
+    csv_text = _decode_csv(content)
     reader = csv.DictReader(io.StringIO(csv_text))
     fieldnames = reader.fieldnames or []
     header_map = {h.lower().strip(): h for h in fieldnames}

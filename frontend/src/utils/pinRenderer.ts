@@ -26,12 +26,19 @@ export type ParsedSvgData = {
   textElements: SvgTextElement[];
 };
 
+export type TextEffect = 'none' | 'drop' | 'echo' | 'outline';
+
 export type RenderSettings = {
   fontFamily: string;
   textColor: string;
   titleScale?: number;
   titlePaddingX?: number;
   lineHeightMultiplier?: number;
+  letterSpacing?: number;
+  uppercase?: boolean;
+  maxLines?: number;
+  textEffect?: TextEffect;
+  textEffectColor?: string;
   imageSettings?: {
     ignoreSmallWidth?: boolean;
     minWidth?: number;
@@ -41,6 +48,8 @@ export type RenderSettings = {
     limitImagesPerPage?: boolean;
   };
 };
+
+export type TextBlockBounds = { x: number; y: number; width: number; height: number };
 
 function orientationOfImage(img: HTMLImageElement): 'portrait' | 'square' | 'landscape' {
   const w = img.naturalWidth || 0;
@@ -407,21 +416,28 @@ export function fitTitle(
   fontFamily: string,
   padX = 15,
   lineHeightMultiplier = 1,
+  letterSpacing = 0,
+  maxLines = 3,
+  uppercase = true,
 ): { lines: string[]; fontSize: number } {
-  const upper = String(text || '').toUpperCase().trim() || 'SAMPLE TITLE';
+  const source = uppercase
+    ? String(text || '').toUpperCase().trim() || 'SAMPLE TITLE'
+    : (String(text || '').trim() || 'Sample Title');
+  try { (ctx as unknown as { letterSpacing: string }).letterSpacing = `${Number(letterSpacing || 0)}px`; } catch { /* not supported */ }
   const usableW = Math.max(20, zoneW - (2 * Math.max(0, padX)));
   const usableH = zoneH;
+  const allowed = Math.max(1, Number(maxLines) || 3);
   let lo = 12;
   let hi = 220;
-  let best = { lines: [upper], fontSize: 12, penalty: 9999 };
+  let best = { lines: [source], fontSize: 12, penalty: 9999 };
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     ctx.font = `900 ${mid}px ${fontFamily}`;
-    const lines = wrapWords(ctx, upper, usableW);
+    const lines = wrapWords(ctx, source, usableW);
     const lineH = mid * lineHeightMultiplier;
     const totalH = lines.length * lineH;
     const maxW = Math.max(...lines.map((line) => ctx.measureText(line).width), 0);
-    const fits = lines.length <= 3 && maxW <= usableW && totalH <= usableH;
+    const fits = lines.length <= allowed && maxW <= usableW && totalH <= usableH;
     if (fits) {
       const penalty = linePenalty(ctx, lines);
       best = { lines, fontSize: mid, penalty };
@@ -433,10 +449,10 @@ export function fitTitle(
   // If no fit found at >12, try smallest fallback.
   if (best.fontSize <= 12) {
     ctx.font = `900 12px ${fontFamily}`;
-    const lines = wrapWords(ctx, upper, usableW).slice(0, 3);
+    const lines = wrapWords(ctx, source, usableW).slice(0, allowed);
     return { lines, fontSize: 12 };
   }
-  return { lines: best.lines, fontSize: best.fontSize };
+  return { lines: best.lines.slice(0, allowed), fontSize: best.fontSize };
 }
 
 export async function ensureFontLoaded(fontFamily: string) {
@@ -486,12 +502,12 @@ export async function renderPin(
   svgData: ParsedSvgData,
   overlayCanvas: HTMLCanvasElement,
   settings: RenderSettings,
-): Promise<HTMLCanvasElement> {
+): Promise<{ canvas: HTMLCanvasElement; textBlock: TextBlockBounds | null }> {
   const canvas = document.createElement('canvas');
   canvas.width = svgData.canvasW;
   canvas.height = svgData.canvasH;
   const ctx = canvas.getContext('2d');
-  if (!ctx) return canvas;
+  if (!ctx) return { canvas, textBlock: null };
 
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, svgData.canvasW, svgData.canvasH);
@@ -553,6 +569,11 @@ export async function renderPin(
   const lineHeightMultiplier = Number.isFinite(Number(settings.lineHeightMultiplier))
     ? Math.max(0.8, Math.min(1.4, Number(settings.lineHeightMultiplier)))
     : 1;
+  const letterSpacing = Number.isFinite(Number(settings.letterSpacing)) ? Number(settings.letterSpacing) : 0;
+  const uppercase = settings.uppercase !== false;
+  const maxLines = Math.max(1, Math.min(8, Number(settings.maxLines) || 3));
+  const textEffect: TextEffect = settings.textEffect ?? 'none';
+  const effectColor = settings.textEffectColor || '#000000';
   const { lines, fontSize } = fitTitle(
     ctx,
     title,
@@ -561,6 +582,9 @@ export async function renderPin(
     settings.fontFamily,
     titlePaddingX,
     lineHeightMultiplier,
+    letterSpacing,
+    maxLines,
+    uppercase,
   );
   const titleScale = Number.isFinite(Number(settings.titleScale)) ? Number(settings.titleScale) : 1;
   const scaledFontSize = Math.max(12, Math.min(220, Math.round(fontSize * Math.max(0.6, Math.min(1.8, titleScale)))));
@@ -568,6 +592,7 @@ export async function renderPin(
   const centerX = svgData.textZoneX + (svgData.textZoneW / 2);
 
   ctx.font = `900 ${scaledFontSize}px ${settings.fontFamily}`;
+  try { (ctx as unknown as { letterSpacing: string }).letterSpacing = `${letterSpacing}px`; } catch { /* not supported */ }
   ctx.fillStyle = settings.textColor;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'alphabetic';
@@ -578,7 +603,50 @@ export async function renderPin(
   const capH = capAscent + capDescent;
   const visualH = capH + (lines.length - 1) * lineH;
   const firstBase = svgData.textZoneY + (svgData.textZoneH - visualH) / 2 + capAscent;
-  lines.forEach((line, index) => ctx.fillText(line, centerX, firstBase + index * lineH));
 
-  return canvas;
+  const drawLine = (line: string, x: number, y: number, mode: 'effect' | 'main') => {
+    if (mode === 'effect') {
+      if (textEffect === 'drop') {
+        ctx.save();
+        ctx.shadowColor = effectColor;
+        ctx.shadowBlur = Math.max(2, scaledFontSize * 0.08);
+        ctx.shadowOffsetX = scaledFontSize * 0.04;
+        ctx.shadowOffsetY = scaledFontSize * 0.05;
+        ctx.fillStyle = settings.textColor;
+        ctx.fillText(line, x, y);
+        ctx.restore();
+      } else if (textEffect === 'echo') {
+        ctx.fillStyle = effectColor;
+        ctx.fillText(line, x + scaledFontSize * 0.05, y + scaledFontSize * 0.06);
+      } else if (textEffect === 'outline') {
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = Math.max(1, scaledFontSize * 0.045);
+        ctx.strokeStyle = effectColor;
+        ctx.strokeText(line, x, y);
+      }
+      return;
+    }
+    ctx.fillStyle = settings.textColor;
+    ctx.fillText(line, x, y);
+  };
+
+  lines.forEach((line, index) => {
+    const y = firstBase + index * lineH;
+    if (textEffect !== 'none') drawLine(line, centerX, y, 'effect');
+    drawLine(line, centerX, y, 'main');
+  });
+
+  // Bug 3: report the actual rendered text-block bounds so the dashed zone box
+  // can track the text instead of staying glued to the static zone geometry.
+  try { (ctx as unknown as { letterSpacing: string }).letterSpacing = '0px'; } catch { /* not supported */ }
+  const lineWidths = lines.map((line) => ctx.measureText(line).width);
+  const maxLineW = Math.max(1, ...lineWidths);
+  const textBlock: TextBlockBounds = {
+    x: centerX - maxLineW / 2,
+    y: firstBase - capAscent,
+    width: maxLineW,
+    height: visualH,
+  };
+
+  return { canvas, textBlock };
 }
